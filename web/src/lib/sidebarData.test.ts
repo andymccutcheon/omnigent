@@ -115,6 +115,8 @@ describe("scope refresh", () => {
     expect(refreshed.pages[0].data.map((session) => session.id)).toEqual(
       afterLoadMore.pages[0].data.map((session) => session.id),
     );
+    // The continuation cursor stays the server's last row, not the last displayed one.
+    expect(refreshed.pages[0].last_id).toBe("d");
   });
 });
 
