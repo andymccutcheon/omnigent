@@ -366,7 +366,7 @@ def _wait_for_host_online(client: httpx.Client, host_id: str, timeout: float = 4
                 for host in resp.json().get("hosts", []):
                     if host["host_id"] == host_id and host["status"] == "online":
                         return
-        except httpx.ConnectError:
+        except httpx.TransportError:
             # Server isn't accepting connections yet (still starting up);
             # keep polling until the deadline.
             pass
@@ -374,42 +374,27 @@ def _wait_for_host_online(client: httpx.Client, host_id: str, timeout: float = 4
     raise AssertionError(f"Host {host_id!r} did not appear online within {timeout}s")
 
 
-@pytest.fixture(scope="module")
-def unmanaged_pi_host(
-    live_server: str,
-    http_client: httpx.Client,
-    tmp_path_factory: pytest.TempPathFactory,
+@contextlib.contextmanager
+def _seeded_pi_host(
+    home: Path,
+    host_id: str,
+    server_url: str,
+    client: httpx.Client,
+    *,
+    env_overrides: dict[str, str] | None = None,
 ) -> Iterator[_UnmanagedPiHost]:
-    """Spawn one host daemon with a logged-in-but-unmanaged Pi for both facets.
-
-    :param live_server: Server URL the daemon registers with.
-    :param http_client: HTTP client pointed at the server.
-    :param tmp_path_factory: Module-scoped temp dir factory (the daemon HOME).
-    :yields: The spawned :class:`_UnmanagedPiHost`.
-    """
-    home = tmp_path_factory.mktemp("unmanaged-pi-home")
-    host_id = _seed_unmanaged_pi_home(home)
+    """Run a host whose scenario has already seeded its identity and Pi files."""
     daemon_log = home / "host-daemon.log"
-    # Pin BOTH HOME and OMNIGENT_CONFIG_HOME to the seeded dir so the daemon
-    # reads the seeded (provider-less) omnigent config and Pi login, not any
-    # ambient OMNIGENT_CONFIG_HOME the surrounding session exported. Without
-    # this the daemon inherits the caller's provider config and
-    # resolve_pi_native_provider() would be None for the wrong reason (an
-    # unresolvable managed provider) instead of the reported one (no managed
-    # provider at all).
+    # Read the scenario's provider config and Pi login from its own home.
     env = {
         **os.environ,
+        **(env_overrides or {}),
         "HOME": str(home),
         "OMNIGENT_CONFIG_HOME": str(home / ".omnigent"),
         "OMNIGENT_DATA_DIR": str(home / ".omnigent"),
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
     }
-    # Prepend ABSOLUTE worktree roots to PYTHONPATH. The runner the daemon
-    # spawns runs with cwd=<workspace>, so any relative PYTHONPATH entry (the
-    # ambient one here is ``sdks/python-client:sdks/ui``, and it omits the
-    # worktree root) dangles and the runner fails with
-    # ``ModuleNotFoundError: omnigent``. Absolute paths resolve from any cwd;
-    # in CI, where the checkout is the worktree, this is redundant-but-harmless.
+    # Spawned runners change cwd, so this checkout needs absolute import paths.
     _existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(
         [
@@ -421,14 +406,14 @@ def unmanaged_pi_host(
     )
     with open(daemon_log, "w") as log_fh:
         proc = subprocess.Popen(
-            [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", live_server],
+            [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", server_url],
             env=apply_runner_env(env),
             cwd=compat_runner_cwd(),
             stdout=subprocess.DEVNULL,
             stderr=log_fh,
         )
     try:
-        _wait_for_host_online(http_client, host_id, timeout=45.0)
+        _wait_for_host_online(client, host_id, timeout=45.0)
         yield _UnmanagedPiHost(proc=proc, host_id=host_id, home=home, daemon_log=daemon_log)
     finally:
         proc.send_signal(signal.SIGTERM)
@@ -437,6 +422,18 @@ def unmanaged_pi_host(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+@pytest.fixture(scope="module")
+def unmanaged_pi_host(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[_UnmanagedPiHost]:
+    home = tmp_path_factory.mktemp("unmanaged-pi-home")
+    host_id = _seed_unmanaged_pi_home(home)
+    with _seeded_pi_host(home, host_id, live_server, http_client) as host:
+        yield host
 
 
 def test_facet1_prelaunch_model_options_offer_the_hosts_pi_models(

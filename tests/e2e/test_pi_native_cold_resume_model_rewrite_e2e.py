@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import io
 import json
-import os
 import shutil
-import signal
 import subprocess
-import tarfile
 import tempfile
 import time
 import uuid
@@ -19,12 +15,11 @@ import httpx
 import pytest
 import yaml
 
-from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
-from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
+from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.helpers import POLL_INTERVAL_S
-
-_WORKTREE = Path(__file__).resolve().parents[2]
+from tests.e2e.test_pi_native_unmanaged_model import _seeded_pi_host
+from tests.e2e.test_pi_native_unmanaged_model import _UnmanagedPiHost as _ColdResumePiHost
 
 _PI_OWN_PROVIDER = "openai-codex"
 _PI_MODEL_ID = "gpt-5.6-sol"
@@ -150,20 +145,6 @@ def _capture_pane_diagnostics(marker: str, out_path: Path) -> None:
             out_path.write_text("\n".join(chunks))
 
 
-class _ColdResumePiHost:
-    def __init__(
-        self,
-        proc: subprocess.Popen[bytes],
-        host_id: str,
-        home: Path,
-        daemon_log: Path,
-    ) -> None:
-        self.proc = proc
-        self.host_id = host_id
-        self.home = home
-        self.daemon_log = daemon_log
-
-
 def _seed_cold_resume_pi_home(home: Path) -> str:
     omni_dir = home / ".omnigent"
     omni_dir.mkdir(parents=True, exist_ok=True)
@@ -217,21 +198,6 @@ def _seed_cold_resume_pi_home(home: Path) -> str:
     return host_id
 
 
-def _wait_for_host_online(client: httpx.Client, host_id: str, timeout: float = 45.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            resp = client.get("/v1/hosts")
-            if resp.status_code == 200:
-                for host in resp.json().get("hosts", []):
-                    if host.get("host_id") == host_id and host.get("status") == "online":
-                        return
-        except httpx.TransportError:
-            pass  # daemon not listening (or slow) yet; keep polling until the deadline
-        time.sleep(POLL_INTERVAL_S)
-    raise AssertionError(f"Host {host_id!r} did not appear online within {timeout}s")
-
-
 @pytest.fixture(scope="module")
 def cold_resume_pi_host(
     live_server: str,
@@ -240,43 +206,14 @@ def cold_resume_pi_host(
 ) -> Iterator[_ColdResumePiHost]:
     home = tmp_path_factory.mktemp("cold-resume-pi-home")
     host_id = _seed_cold_resume_pi_home(home)
-    daemon_log = home / "host-daemon.log"
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "OMNIGENT_CONFIG_HOME": str(home / ".omnigent"),
-        "OMNIGENT_DATA_DIR": str(home / ".omnigent"),
-        PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
-        "PI_OFFLINE": "1",
-        "PI_TELEMETRY": "0",
-    }
-    _existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            str(_WORKTREE),
-            str(_WORKTREE / "sdks" / "python-client"),
-            str(_WORKTREE / "sdks" / "ui"),
-        ]
-        + ([_existing] if _existing else [])
-    )
-    with open(daemon_log, "w") as log_fh:
-        proc = subprocess.Popen(
-            [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", live_server],
-            env=apply_runner_env(env),
-            cwd=compat_runner_cwd(),
-            stdout=subprocess.DEVNULL,
-            stderr=log_fh,
-        )
-    try:
-        _wait_for_host_online(http_client, host_id, timeout=45.0)
-        yield _ColdResumePiHost(proc=proc, host_id=host_id, home=home, daemon_log=daemon_log)
-    finally:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+    with _seeded_pi_host(
+        home,
+        host_id,
+        live_server,
+        http_client,
+        env_overrides={"PI_OFFLINE": "1", "PI_TELEMETRY": "0"},
+    ) as host:
+        yield host
 
 
 def _create_pi_native_session(http_client: httpx.Client, host: _ColdResumePiHost) -> str:
@@ -297,30 +234,18 @@ def _create_pi_native_session(http_client: httpx.Client, host: _ColdResumePiHost
             "",
         ]
     )
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        data = spec_yaml.encode()
-        info = tarfile.TarInfo("pi-native-ui.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-
     workspace = host.home / "ws"
     workspace.mkdir(exist_ok=True)
-    create = http_client.post(
+    create = post_session_bundle(
+        http_client.post,
         "/v1/sessions",
-        data={
-            "metadata": json.dumps(
-                {
-                    "host_id": host.host_id,
-                    "workspace": str(workspace),
-                    "labels": {
-                        "omnigent.ui": "terminal",
-                        "omnigent.wrapper": "pi-native-ui",
-                    },
-                }
-            )
+        bundle_files({"pi-native-ui.yaml": spec_yaml.encode()}),
+        metadata={
+            "host_id": host.host_id,
+            "workspace": str(workspace),
+            "labels": {"omnigent.ui": "terminal", "omnigent.wrapper": "pi-native-ui"},
         },
-        files={"bundle": ("pi-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
+        filename="pi-native-ui.tar.gz",
         timeout=60.0,
     )
     assert create.status_code in (200, 201), f"session create failed: {create.text}"

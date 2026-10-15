@@ -5421,44 +5421,29 @@ async def _launch_pi_terminal_args(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_source", ["override", "spec"])
 async def test_auto_create_pi_terminal_passes_pi_own_login_reference_through(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    model_source: str,
 ) -> None:
     _seed_pi_own_login_catalog(tmp_path / "pi-own-login")
-
-    args = await _launch_pi_terminal_args(
-        tmp_path, monkeypatch, model_override="openai-codex/gpt-5.6-sol"
-    )
-
-    assert "omnigent/openai-codex/gpt-5.6-sol" not in args
-    assert "--provider" not in args
-    assert "--model" in args
-    assert args[args.index("--model") + 1] == "openai-codex/gpt-5.6-sol"
-
-
-@pytest.mark.asyncio
-async def test_auto_create_pi_terminal_spec_pinned_own_login_reference_passes_through(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _seed_pi_own_login_catalog(tmp_path / "pi-own-login")
-
+    selected = "openai-codex/gpt-5.6-sol"
     args = await _launch_pi_terminal_args(
         tmp_path,
         monkeypatch,
-        model_override=None,
-        agent_spec=AgentSpec(
-            spec_version=1,
-            name="pi",
-            executor=ExecutorSpec(model="openai-codex/gpt-5.6-sol"),
+        model_override=selected if model_source == "override" else None,
+        agent_spec=(
+            AgentSpec(spec_version=1, name="pi", executor=ExecutorSpec(model=selected))
+            if model_source == "spec"
+            else None
         ),
     )
 
     assert "omnigent/openai-codex/gpt-5.6-sol" not in args
     assert "--provider" not in args
     assert "--model" in args
-    assert args[args.index("--model") + 1] == "openai-codex/gpt-5.6-sol"
+    assert args[args.index("--model") + 1] == selected
 
 
 @pytest.mark.asyncio
