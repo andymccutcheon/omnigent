@@ -675,7 +675,8 @@ def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
     assert "setting_00=" + "v" * 57 + "..." in reason
     # Extras are cut at a pair boundary, never mid key=value.
     assert ", ...). Approve?" in reason
-    assert "setting_0" not in reason.split(", ...")[0].rsplit(", ", 1)[1][:0]
+    extras = reason.split(" (", 1)[1].split(", ...)", 1)[0]
+    assert extras.split(", ") == [f"setting_{i:02d}=" + "v" * 57 + "..." for i in range(2)]
     assert len(reason) < 320
 
 
