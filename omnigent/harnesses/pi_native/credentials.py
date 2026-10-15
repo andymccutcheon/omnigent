@@ -469,6 +469,7 @@ def _pi_own_login_models(root: Path) -> list[ScopableModel]:
     for provider_id, payload in declared.items() if _is_str_object_dict(declared) else ():
         api_key = payload.get("apiKey") if _is_str_object_dict(payload) else None
         if provider_id in logged_in or (isinstance(api_key, str) and api_key):
+            # Declared models follow the cache so their names win on duplicate references.
             catalogs.append((provider_id, payload))
     catalog: dict[str, ScopableModel] = {}
     for provider_id, payload in catalogs:
@@ -1864,9 +1865,8 @@ def resolve_pi_native_provider(
                 "surface; Pi will use its own login."
             )
             return None
-        # Split only when the prefix names a configured provider; any other
-        # slash id is the endpoint's own model naming (e.g. "openai/gpt-4o"
-        # on OpenRouter) and must stay verbatim.
+        # Remaining slash ids use the endpoint's model naming (e.g. OpenRouter's
+        # "openai/gpt-4o"); split only when the prefix names a configured provider.
         if names_configured_provider:
             if prefix != entry.name:
                 unmanaged_prefix_warning = (
