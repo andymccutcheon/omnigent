@@ -363,6 +363,26 @@ SCHEDULED_TASK_APPROVAL_TOOLS: frozenset[str] = frozenset(
 )
 
 
+_PREVIEW_VALUE_CHARS = 60
+
+
+def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
+    """``key=value`` pairs for every argument but ``skip``, each value bounded.
+
+    The free-text prompt can be long enough to push the other settings out of
+    the card's truncated argument preview, so it is reported by length only.
+    """
+    parts = []
+    for key in sorted(args):
+        if key == skip:
+            continue
+        if key == "prompt":
+            parts.append(f"prompt={len(str(args[key]))} chars")
+        else:
+            parts.append(f"{key}={str(args[key])[:_PREVIEW_VALUE_CHARS]}")
+    return ", ".join(parts)
+
+
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     """ASK for user approval before an agent creates or updates a scheduled task.
 
@@ -388,12 +408,12 @@ def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     if not args:
         preview = f"{action} a scheduled task (details unavailable)"
     elif action == "create":
-        preview = f"create scheduled task {args.get('name', '')!r} ({args.get('rrule', '')})"
+        settings = _scheduled_task_settings(args, skip="name")
+        preview = f"create scheduled task {args.get('name', '')!r} ({settings or 'no settings'})"
     else:
-        fields = ", ".join(sorted(key for key in args if key != "scheduled_task_id"))
-        preview = (
-            f"update scheduled task {args.get('scheduled_task_id', '')} ({fields or 'no fields'})"
-        )
+        settings = _scheduled_task_settings(args, skip="scheduled_task_id")
+        task_id = args.get("scheduled_task_id", "")
+        preview = f"update scheduled task {task_id} ({settings or 'no fields'})"
     return {
         "result": "ASK",
         "reason": f"Agent wants to {preview}. Approve?",

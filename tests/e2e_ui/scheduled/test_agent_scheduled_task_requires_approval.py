@@ -175,16 +175,20 @@ def scheduling_session(
     runner_id = str(_server_state["runner_id"])
     model = f"sched-approval-{uuid.uuid4().hex[:8]}"
     task_name = f"Daily digest {uuid.uuid4().hex[:6]}"
-    session_id = _create_bundled_session(live_server, runner_id, _AGENT_YAML.format(model=model))
-    policies = httpx.get(f"{live_server}/v1/sessions/{session_id}/policies", timeout=10.0).json()
-    assert policies["data"] == [], policies
-    assert not _tasks_named(live_server, task_name)
+    session_id: str | None = None
     try:
+        session_id = _create_bundled_session(
+            live_server, runner_id, _AGENT_YAML.format(model=model)
+        )
+        policies = httpx.get(f"{live_server}/v1/sessions/{session_id}/policies", timeout=10.0)
+        assert policies.json()["data"] == [], policies.text
+        assert not _tasks_named(live_server, task_name)
         yield (live_server, session_id, model, task_name)
     finally:
         for task in _tasks_named(live_server, task_name):
             httpx.delete(f"{live_server}/v1/scheduled-tasks/{task['id']}", timeout=10.0)
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if session_id is not None:
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         if respawned is not None:
             respawned.terminate()
             respawned.wait(timeout=5)

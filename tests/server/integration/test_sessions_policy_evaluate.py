@@ -759,7 +759,7 @@ async def test_scheduled_changes_require_explicit_approval_without_custom_polici
         )
     )
     try:
-        # Omitted settings still persist inherited defaults and need consent.
+        # The built-in scheduled-task gate must fire even with no custom policies.
         elicitation_id = await asyncio.wait_for(drain, timeout=5)
         assert not evaluate.done()
         response = await client.post(

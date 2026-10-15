@@ -607,7 +607,46 @@ def test_ask_on_scheduled_task_change_asks_for_create_with_preview() -> None:
     )
     assert result["result"] == "ASK"
     assert "nightly triage" in result["reason"]
-    assert "FREQ=DAILY;BYHOUR=9" in result["reason"]
+    assert "rrule=FREQ=DAILY;BYHOUR=9" in result["reason"]
+
+
+def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_prompt() -> None:
+    """Launch settings stay in the reason however long the prompt is; the prompt is sized only."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    prompt = "Summarize everything. " * 300
+    result = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_create",
+            "data": {
+                "name": "sys_scheduled_task_create",
+                "arguments": {
+                    "name": "nightly triage",
+                    "prompt": prompt,
+                    "rrule": "FREQ=DAILY;BYHOUR=9",
+                    "agent_id": "ag_1",
+                    "host_id": "host_1",
+                    "execution_target": "managed_sandbox",
+                    "permission_mode": "bypassPermissions",
+                    "max_cost_usd": 2.5,
+                },
+            },
+        }
+    )
+    reason = result["reason"]
+    assert result["result"] == "ASK"
+    for setting in (
+        "agent_id=ag_1",
+        "host_id=host_1",
+        "execution_target=managed_sandbox",
+        "permission_mode=bypassPermissions",
+        "max_cost_usd=2.5",
+        f"prompt={len(prompt)} chars",
+    ):
+        assert setting in reason, reason
+    assert "Summarize everything." not in reason
+    assert len(reason) < 600
 
 
 def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
@@ -629,7 +668,7 @@ def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
     )
     assert result["result"] == "ASK"
     assert "0123456789abcdef0123456789abcdef" in result["reason"]
-    assert "state" in result["reason"]
+    assert "state=paused" in result["reason"]
 
 
 @pytest.mark.parametrize(

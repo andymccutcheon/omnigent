@@ -107,8 +107,8 @@ name: no-guardrails
         conversation_id=conv.id,
         conversation_store=conversation_store,
     )
-    # No user-declared guardrails, but the hardcoded
-    # ask_on_add_policy guard is always present.
+    # No user-declared guardrails, but the hardcoded approval guards
+    # are always present.
     assert len(engine.policies) == 2
     assert engine.policies[0].spec.name == "__ask_on_add_policy"
     assert engine.label_defs == {}
@@ -187,8 +187,8 @@ guardrails:
     # Names in YAML order — regression would reorder alphabet
     # or reverse direction.
     names = [p.spec.name for p in engine.policies]
-    # Declared policies in YAML order, plus the hardcoded
-    # ask_on_add_policy guard appended by the builder.
+    # Declared policies in YAML order, plus the mandatory approval
+    # guards appended by the builder.
     assert names == [
         "alpha",
         "bravo",
@@ -632,7 +632,7 @@ def test_empty_default_policies_preserves_existing_behaviour(
         conversation_store=conversation_store,
         default_policies=[],
     )
-    # Only the hardcoded ask_on_add_policy guard.
+    # Only the two hardcoded approval guards.
     assert len(engine_none.policies) == 2
     assert engine_none.policies[0].spec.name == "__ask_on_add_policy"
     assert len(engine_empty.policies) == 2

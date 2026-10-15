@@ -302,7 +302,7 @@ def test_build_engine_no_store_returns_noop(db_uri: str) -> None:
         policy_store=None,
     )
 
-    # No user-declared policies, but ask_on_add_policy is always present.
+    # No user-declared policies, but the mandatory approval guards are always present.
     assert len(engine.policies) == 2
     assert engine.policies[0].spec.name == "__ask_on_add_policy"
 
