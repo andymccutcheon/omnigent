@@ -1,11 +1,8 @@
-"""The engine must gate agent scheduled-task mutations like ``sys_add_policy``.
+"""Scheduled-task mutations require approval even without configured guardrails.
 
-``build_policy_engine`` injects ``__ask_on_add_policy`` into every engine and
-``any_policies_apply`` never fast-paths ``sys_add_policy``, so an agent cannot
-install a policy without the user approving. Scheduled tasks are durable work
-created through the same tool relay, so ``sys_scheduled_task_create`` and
-``sys_scheduled_task_update`` are held to the same bar on a spec with no
-guardrails; reads stay ungated.
+``build_policy_engine`` injects the mandatory approval guards into every engine
+and ``any_policies_apply`` never fast-paths their tools; reads and deletes stay
+allowed.
 """
 
 from __future__ import annotations
@@ -17,7 +14,6 @@ import pytest
 from omnigent.entities import Conversation
 from omnigent.policies.types import EvaluationContext
 from omnigent.runtime.policies.builder import any_policies_apply, build_policy_engine
-from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.spec.parser import parse
 from omnigent.spec.types import AgentSpec, Phase, PolicyAction
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -33,19 +29,12 @@ _CREATE_ARGS = {
 }
 
 
-def _no_guardrails_engine(
+def _no_guardrails_spec(
     tmp_path: Path,
     conversation_store: SqlAlchemyConversationStore,
-) -> tuple[AgentSpec, Conversation, PolicyEngine]:
+) -> tuple[AgentSpec, Conversation]:
     (tmp_path / "config.yaml").write_text("spec_version: 1\nname: scheduler-probe\n")
-    spec = parse(tmp_path)
-    conv = conversation_store.create_conversation()
-    engine = build_policy_engine(
-        spec=spec,
-        conversation_id=conv.id,
-        conversation_store=conversation_store,
-    )
-    return spec, conv, engine
+    return parse(tmp_path), conversation_store.create_conversation()
 
 
 @pytest.mark.asyncio
@@ -54,6 +43,7 @@ def _no_guardrails_engine(
     [
         ("sys_add_policy", {"name": "shell_gate", "handler": "x.y"}, PolicyAction.ASK),
         ("sys_scheduled_task_list", {}, PolicyAction.ALLOW),
+        ("sys_scheduled_task_delete", {"scheduled_task_id": _TASK_ID}, PolicyAction.ALLOW),
         ("sys_scheduled_task_create", _CREATE_ARGS, PolicyAction.ASK),
         (
             "sys_scheduled_task_update",
@@ -61,7 +51,7 @@ def _no_guardrails_engine(
             PolicyAction.ASK,
         ),
     ],
-    ids=["add_policy_control", "list_stays_allowed", "create", "update"],
+    ids=["add_policy_control", "list_stays_allowed", "delete_stays_allowed", "create", "update"],
 )
 async def test_scheduled_task_mutation_asks_without_guardrails(
     tmp_path: Path,
@@ -70,7 +60,12 @@ async def test_scheduled_task_mutation_asks_without_guardrails(
     arguments: dict[str, object],
     expected: PolicyAction,
 ) -> None:
-    _spec, _conv, engine = _no_guardrails_engine(tmp_path, conversation_store)
+    spec, conv = _no_guardrails_spec(tmp_path, conversation_store)
+    engine = build_policy_engine(
+        spec=spec,
+        conversation_id=conv.id,
+        conversation_store=conversation_store,
+    )
     result = await engine.evaluate(
         EvaluationContext(
             phase=Phase.TOOL_CALL,
@@ -90,8 +85,26 @@ def test_no_policy_fast_path_keeps_mutation_gates(
     conversation_store: SqlAlchemyConversationStore,
     tool_name: str,
 ) -> None:
-    spec, conv, _engine = _no_guardrails_engine(tmp_path, conversation_store)
+    spec, conv = _no_guardrails_spec(tmp_path, conversation_store)
     assert any_policies_apply(
+        spec=spec,
+        conversation_id=conv.id,
+        default_policies=None,
+        policy_store=None,
+        phase=Phase.TOOL_CALL,
+        tool_name=tool_name,
+        conversation=conv,
+    )
+
+
+@pytest.mark.parametrize("tool_name", ["sys_scheduled_task_list", "sys_scheduled_task_delete"])
+def test_no_policy_fast_path_skips_ungated_scheduled_task_tools(
+    tmp_path: Path,
+    conversation_store: SqlAlchemyConversationStore,
+    tool_name: str,
+) -> None:
+    spec, conv = _no_guardrails_spec(tmp_path, conversation_store)
+    assert not any_policies_apply(
         spec=spec,
         conversation_id=conv.id,
         default_policies=None,

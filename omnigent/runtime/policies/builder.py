@@ -83,9 +83,9 @@ _ASK_ON_ADD_POLICY_SPEC = FunctionPolicySpec(
     ),
 )
 
-# Same posture for the scheduled-task tools named by
-# SCHEDULED_TASK_APPROVAL_TOOLS: an agent cannot persist or change
-# unattended work without user approval.
+# Same posture for the scheduled-task tools in SCHEDULED_TASK_APPROVAL_TOOLS:
+# an agent cannot create or update unattended work without user approval.
+# Listing and deleting tasks stay ungated.
 _ASK_ON_SCHEDULED_TASK_CHANGE_SPEC = FunctionPolicySpec(
     name="__ask_on_scheduled_task_change",
     on=None,
@@ -635,10 +635,9 @@ def build_policy_engine(
     admin_policy_specs: list[PolicySpec] = db_default_policy_specs + list(default_policies or [])
     all_policy_specs = session_policy_specs + agent_policy_specs + admin_policy_specs
 
-    # Always require user approval before sys_add_policy and scheduled-task
-    # changes execute. Appended unconditionally so the guards are present
-    # even when no other guardrails are declared (the noop-engine path below
-    # is no longer reachable since all_policy_specs is never empty).
+    # Mandatory approval guards: appended unconditionally so sys_add_policy
+    # and scheduled-task create/update always ask the user, even when no
+    # other guardrails are declared.
     all_policy_specs.extend(_REQUIRED_APPROVAL_SPECS)
 
     label_defs = dict((guardrails.labels or {}) if guardrails else {})

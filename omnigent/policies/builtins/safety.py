@@ -355,7 +355,7 @@ def ask_on_add_policy(event: PolicyEvent) -> PolicyResponse:
     }
 
 
-# Agent tools that persist or change unattended work. The builder injects
+# Agent tools that create or reshape unattended work. The builder injects
 # ``ask_on_scheduled_task_change`` into every engine and exempts these names
 # from its no-policy fast path; both read this set so they cannot drift.
 SCHEDULED_TASK_APPROVAL_TOOLS: frozenset[str] = frozenset(
@@ -368,7 +368,8 @@ def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
 
     Matches ``event["target"]`` (the dispatched tool identity) rather than
     ``data["name"]``, which an earlier policy may have transformed. Reads
-    and ``sys_scheduled_task_delete`` are not gated here.
+    and ``sys_scheduled_task_delete`` are not gated here: deleting a task
+    only removes future runs instead of scheduling new unattended work.
 
     :param event: Policy event dict.
     :returns: ASK if a scheduled task is being created or updated, ALLOW
@@ -383,11 +384,16 @@ def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     args = data.get("arguments") if isinstance(data, dict) else None
     if not isinstance(args, dict):
         args = {}
-    if tool == "sys_scheduled_task_create":
+    action = "create" if tool == "sys_scheduled_task_create" else "update"
+    if not args:
+        preview = f"{action} a scheduled task (details unavailable)"
+    elif action == "create":
         preview = f"create scheduled task {args.get('name', '')!r} ({args.get('rrule', '')})"
     else:
         fields = ", ".join(sorted(key for key in args if key != "scheduled_task_id"))
-        preview = f"update scheduled task {args.get('scheduled_task_id', '')} ({fields})"
+        preview = (
+            f"update scheduled task {args.get('scheduled_task_id', '')} ({fields or 'no fields'})"
+        )
     return {
         "result": "ASK",
         "reason": f"Agent wants to {preview}. Approve?",

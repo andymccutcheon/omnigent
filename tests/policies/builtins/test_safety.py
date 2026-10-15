@@ -654,7 +654,7 @@ def test_ask_on_scheduled_task_change_allows_non_tool_events() -> None:
 
 
 def test_ask_on_scheduled_task_change_handles_missing_arguments() -> None:
-    """Missing or non-dict arguments still ASK without crashing."""
+    """Missing or non-dict arguments still ASK, with a readable fallback preview."""
     from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
 
     result = ask_on_scheduled_task_change(
@@ -665,6 +665,7 @@ def test_ask_on_scheduled_task_change_handles_missing_arguments() -> None:
         }
     )
     assert result["result"] == "ASK"
+    assert "details unavailable" in result["reason"]
 
 
 # ── block_skills: native Skill tool (PreToolUse hook path) ─────────────────
