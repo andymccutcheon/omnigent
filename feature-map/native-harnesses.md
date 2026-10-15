@@ -250,6 +250,8 @@ Cross-harness journeys:
   hold the initial POST response open through Retry, then fail that old response;
   the newer attempt must remain authoritative. It also checks rejection and answering through the existing terminal view toggle. Two
   identical commands have distinct request IDs; only the first may be answered.
+  Write variants use Kiro's full-path heading and diff preview, covering approval
+  and rejection with a second same-basename file left pending.
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_late_confirmation_removes_retry`
   delays input consumption with real elapsed time and checks that late
   confirmation removes Retry without sending another Enter, including when the

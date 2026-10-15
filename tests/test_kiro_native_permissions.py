@@ -82,6 +82,21 @@ def test_parse_permission_request_preserves_option_ids_by_kind() -> None:
     assert req.decline_option_id == "no-1"
 
 
+def test_parse_write_permission_uses_canonical_path(tmp_path: Path) -> None:
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    message = _permission_msg()
+    message["params"]["toolCall"].update(
+        title="Creating check.txt", rawInput={"path": str(alias / "check.txt")}
+    )
+    message["params"]["_meta"] = {"trustOptions": [{"setting_key": "runtime_write_paths"}]}
+    permission = parse_permission_request(message)
+    assert permission is not None
+    assert permission.terminal_title == f"Write {actual.resolve() / 'check.txt'}"
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -239,6 +254,60 @@ async def test_post_external_elicitation_resolved_shape() -> None:
             {"type": "external_elicitation_resolved", "data": {"elicitation_id": "elic_9"}},
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("action", "path", "trusted_write", "keys"),
+    [
+        ("accept", "/workspace/kiro-approval-check.txt", True, ["Enter"]),
+        ("decline", "/workspace/kiro-approval-check.txt", True, ["Down", "Down", "Enter"]),
+        ("accept", "/other/kiro-approval-check.txt", True, []),
+        ("accept", "/workspace/kiro-approval-check.txt", False, []),
+        ("accept", "kiro-approval-check.txt", True, []),
+    ],
+)
+async def test_write_permission_matches_recorded_path_before_delivering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action, path, trusted_write, keys
+) -> None:
+    from omnigent.harnesses.kiro_native import bridge
+    from tests.test_kiro_native_bridge import _WRITE_PERMISSION_PANE, _install_fake_tmux
+
+    monkeypatch.setattr(knp, "_DELIVERY_CONFIRM_TIMEOUT_S", 0.1)
+    for setting in (
+        "_PERMISSION_ENTER_SETTLE_S",
+        "_PERMISSION_KEY_INTERVAL_S",
+        "_POLL_INTERVAL_S",
+    ):
+        monkeypatch.setattr(bridge, setting, 0)
+    rejected = _WRITE_PERMISSION_PANE.replace(
+        "❯ Yes, single permission", "  Yes, single permission"
+    ).replace("  No (Tab to edit)", "❯ No (Tab to edit)")
+    calls = _install_fake_tmux(
+        monkeypatch, pane_outputs=[_WRITE_PERMISSION_PANE, _WRITE_PERMISSION_PANE, rejected]
+    )
+    bridge.write_tmux_target(tmp_path, socket_path=Path("/tmp/tmux.sock"), tmux_target="main")
+    message = _permission_msg()
+    message["params"]["toolCall"].update(
+        title="Creating kiro-approval-check.txt",
+        rawInput={"command": "create", "path": path, "content": "hello from Kiro"},
+    )
+    if trusted_write:
+        message["params"]["_meta"] = {
+            "trustOptions": [{"setting_key": "runtime_write_paths", "patterns": [path]}]
+        }
+    permission = parse_permission_request(message)
+    assert permission is not None
+    client = _QueueClient([httpx.Response(200, json={"action": action})])
+    await knp._run_one_permission(
+        client,  # type: ignore[arg-type]
+        session_id="conv_write",
+        bridge_dir=tmp_path,
+        permission=permission,
+        elicitation_id="elic_write",
+        record_offset=0,
+    )
+    assert [call[-1] for call in calls if "send-keys" in call] == keys
+    assert client.posts[0][1]["content_preview"] == "Creating kiro-approval-check.txt"
 
 
 @pytest.mark.asyncio

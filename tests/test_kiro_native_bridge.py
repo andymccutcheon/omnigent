@@ -46,6 +46,14 @@ _PERMISSION_PANE_REJECT_FOCUSED = _PERMISSION_PANE.replace(
     "  Yes, single permission\n   Trust, always allow in this session\n ❯ No (Tab to edit)",
 )
 _PERMISSION_PANE_DATE = _PERMISSION_PANE.replace("↓ Shell pwd", "↓ Shell date")
+# Kiro 2.31.1 renders a write preview between the tool heading and picker.
+_WRITE_PERMISSION_PANE = _PERMISSION_PANE.replace(
+    "↓ Shell pwd",
+    "↓ Write /workspace/kiro-approval-check.txt\n"
+    "  added 1 line in kiro-approval-check.txt\n"
+    "     1+  hello from Kiro\n"
+    "────────────────",
+).replace("shell requires approval", "write requires approval")
 
 
 @pytest.fixture
@@ -697,6 +705,31 @@ def test_prepare_bridge_dir_rejects_symlinked_ancestor(
         ("↓ Shell echo tools", "Running: ls", False),
         ("↓ Shell cd /tmp/long-\npath", "Running: cd /tmp/long-path", False),
         ("↓ Shell pwd\n╰ working_dir=/tmp\n────", "Running: pwd", True),
+        (
+            "↓ Write /workspace/check.txt\n  added 1 line in check.txt\n     1+  hello\n────",
+            "Write /workspace/check.txt",
+            True,
+        ),
+        (
+            "↓ Write /other/check.txt\n  added 1 line in check.txt\n     1+  hello\n────",
+            "Write /workspace/check.txt",
+            False,
+        ),
+        ("• Write /workspace/check.txt", "Write /workspace/check.txt", False),
+        (
+            "↓ Write /workspace/check.txt\n  added 1 line in check.txt\n"
+            "     1+  ↓ Write /other/check.txt\n────",
+            "Write /other/check.txt",
+            False,
+        ),
+        ("↓ Write /workspace/check.txt\nunknown detail", "Write /workspace/check.txt", False),
+        ("↓ Shell pwd\n     1+  hello", "Running: pwd", False),
+        (
+            "↓ Write /workspace/check.txt\n  added 1 line, removed 1 line in check.txt\n"
+            "     1-  old text\n     1+  new text\n────",
+            "Write /workspace/check.txt",
+            True,
+        ),
     ],
 )
 def test_permission_title_preserves_command_identity(

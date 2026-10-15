@@ -27,12 +27,29 @@ from .test_message_render_parity import _ensure_chat_view, _select_view_mode, _s
 kiro_shim_session = _kiro_shim_session
 
 
-def _shim(mode: str, *, dropped_enters: int = 1) -> str:
+def _shim(mode: str, *, dropped_enters: int = 1, write: bool = False) -> str:
     commands_anchor = 'COMMANDS = ("alpha", "beta", "gamma")'
     enter_anchor = "    def on_enter(self):\n        if self.active is not None:"
     assert _FAKE_KIRO_SOURCE.count(commands_anchor) == 1
     assert _FAKE_KIRO_SOURCE.count(enter_anchor) == 1
     source = _FAKE_KIRO_SOURCE.replace(commands_anchor, 'COMMANDS = ("alpha", "alpha")')
+    if write:
+        replacements = {
+            '"title": "Running: touch /tmp/setup-step-%s" % name,': (
+                '"title": "Creating check.txt", "path": "/workspace/%s/check.txt" % index,'
+            ),
+            'lines.append(self.active["title"])': (
+                'lines.extend(["↓ Write " + self.active["path"], '
+                '"  added 1 line in check.txt", "     1+  hello from Kiro", SEP])'
+            ),
+            '"title": request["title"],': '"title": request["title"], "rawInput": '
+            '{"command": "create", "path": request["path"], "content": "hello from Kiro"},',
+            '"sessionId": "fake-kiro-session",': '"sessionId": "fake-kiro-session", "_meta": '
+            '{"trustOptions": [{"setting_key": "runtime_write_paths"}]},',
+        }
+        for old, new in replacements.items():
+            assert source.count(old) == 1
+            source = source.replace(old, new)
     return source.replace(
         enter_anchor,
         f"""    def on_enter(self):
@@ -50,8 +67,13 @@ def _shim(mode: str, *, dropped_enters: int = 1) -> str:
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("kiro_shim_session", [_shim("drop")], indirect=True, ids=["lost-enter"])
-@pytest.mark.parametrize("surface", ["chat", "inbox", "standalone", "reject", "terminal"])
+@pytest.mark.parametrize(
+    ("surface", "kiro_shim_session"),
+    [(surface, _shim("drop")) for surface in ("chat", "inbox", "standalone", "reject", "terminal")]
+    + [(surface, _shim("drop", write=True)) for surface in ("write", "write-reject")],
+    indirect=["kiro_shim_session"],
+    ids=["chat", "inbox", "standalone", "reject", "terminal", "write", "write-reject"],
+)
 def test_kiro_manual_retry(
     kiro_shim_session: tuple[str, str, Path], page: Page, surface: str, tmp_path: Path
 ) -> None:
@@ -81,13 +103,12 @@ def test_kiro_manual_retry(
 
         page.route(resolve_url, hold_first_response)
     started = time.monotonic()
-    page.get_by_role(
-        "button", name="Reject" if surface == "reject" else "Approve", exact=True
-    ).click()
+    reject = surface in ("reject", "write-reject")
+    page.get_by_role("button", name="Reject" if reject else "Approve", exact=True).click()
     expect(page.get_by_text("Waiting for Kiro to confirm")).to_be_visible()
     retry = page.get_by_role(
         "button",
-        name="Retry sending rejection" if surface == "reject" else "Retry sending approval",
+        name="Retry sending rejection" if reject else "Retry sending approval",
     )
     expect(retry).not_to_be_visible()
     expect(retry).to_be_visible(timeout=12_000)
@@ -139,7 +160,7 @@ def test_kiro_manual_retry(
     result = next(
         msg["result"] for msg in responses if msg.get("id") == first_id and "result" in msg
     )
-    assert result["outcome"]["optionId"] == ("reject-1-1" if surface == "reject" else "allow-1-1")
+    assert result["outcome"]["optionId"] == ("reject-1-1" if reject else "allow-1-1")
 
 
 @pytest.mark.timeout(180)

@@ -42,6 +42,7 @@ class KiroPermissionRequest:
     title: str
     accept_option_id: str
     decline_option_id: str
+    terminal_title: str | None = None
 
     @property
     def preview(self) -> str:
@@ -114,12 +115,31 @@ def parse_permission_request(message: dict[str, object]) -> KiroPermissionReques
             decline_option_id = option_id
     if not accept_option_id or not decline_option_id:
         return None
+    terminal_title = None
+    raw_input = tool_call.get("rawInput")
+    meta = params.get("_meta")
+    trust_options = meta.get("trustOptions") if isinstance(meta, dict) else None
+    path = raw_input.get("path") if isinstance(raw_input, dict) else None
+    if (
+        isinstance(path, str)
+        and Path(path).is_absolute()
+        and not any(character in path for character in "\r\n\t")
+        and isinstance(trust_options, list)
+        and any(
+            isinstance(option, dict) and option.get("setting_key") == "runtime_write_paths"
+            for option in trust_options
+        )
+    ):
+        # ACP uses a basename summary; the TUI's Write heading uses the full path.
+        with contextlib.suppress(OSError, RuntimeError):
+            terminal_title = f"Write {Path(path).resolve()}"
     return KiroPermissionRequest(
         request_id=request_id,
         tool_call_id=tool_call_id,
         title=title.strip(),
         accept_option_id=accept_option_id,
         decline_option_id=decline_option_id,
+        terminal_title=terminal_title,
     )
 
 
@@ -389,7 +409,7 @@ async def _run_one_permission(
                     send_kiro_permission_verdict,
                     bridge_dir,
                     action=action,
-                    expected_title=permission.title,
+                    expected_title=permission.terminal_title or permission.title,
                     timeout_s=_DELIVERY_CONFIRM_TIMEOUT_S,
                     verdict_recorded=probe.is_resolved,
                 )

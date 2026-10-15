@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -488,15 +489,25 @@ def _kiro_active_permission_tool_line(pane: str) -> str:
             approval_index = index
     if approval_index < 0:
         return ""
+    write_preview = False
     for line in reversed(lines[:approval_index]):
         stripped = line.strip()
         if not stripped or _KIRO_SEPARATOR in stripped or stripped.startswith(("╰ ", "↳ ")):
             continue
         if stripped.startswith("Running:"):
-            return stripped
+            return "" if write_preview else stripped
         for prefix in ("↓ ", "● ", "○ "):
             if stripped.startswith(prefix):
-                return stripped.removeprefix(prefix)
+                tool_line = stripped.removeprefix(prefix)
+                return tool_line if not write_preview or tool_line.startswith("Write ") else ""
+        # Write previews are numbered diff rows and a summary, never tool headings.
+        if line[:1].isspace() and re.fullmatch(
+            r"(?:\d+[+\- ] .*|(?:added|removed) \d+ lines?"
+            r"(?:, (?:added|removed) \d+ lines?)? in .+)",
+            stripped,
+        ):
+            write_preview = True
+            continue
         # History and hard-wrapped fragments cannot identify the active command.
         return ""
     return ""
