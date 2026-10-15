@@ -206,7 +206,8 @@ def _seed_cold_resume_pi_home(home: Path) -> str:
                             "provider": _PI_OWN_PROVIDER,
                             "baseUrl": "https://chatgpt.com/backend-api/codex",
                             "input": ["text", "image"],
-                        }
+                        },
+                        {"id": "picker-model"},
                     ],
                     "checkedAt": 1750000000,
                 }
@@ -246,6 +247,8 @@ def cold_resume_pi_host(
         "OMNIGENT_CONFIG_HOME": str(home / ".omnigent"),
         "OMNIGENT_DATA_DIR": str(home / ".omnigent"),
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
+        "PI_OFFLINE": "1",
+        "PI_TELEMETRY": "0",
     }
     _existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(
@@ -388,6 +391,11 @@ def test_cold_resume_keeps_explicit_openai_codex_selection(
             time.sleep(POLL_INTERVAL_S)
         else:
             raise AssertionError("the initial Pi terminal did not stop before cold resume")
+
+        # Hiding a saved model from the picker must not change its launch identity.
+        (host.home / ".pi/agent/settings.json").write_text(
+            json.dumps({"enabledModels": [f"{_PI_OWN_PROVIDER}/picker-model"]})
+        )
 
         ensured = http_client.post(
             f"/v1/sessions/{session_id}/resources/terminals",

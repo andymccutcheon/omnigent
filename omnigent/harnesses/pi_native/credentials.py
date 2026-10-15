@@ -457,24 +457,8 @@ def _pi_enabled_model_patterns(root: Path) -> list[str]:
     return [pattern for pattern in raw if isinstance(pattern, str) and pattern.strip()]
 
 
-def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
-    """Enumerate the models Pi's own login can use (the unmanaged fallback).
-
-    When no omnigent-managed provider is configured, the launched Pi runs on
-    its own credentials, so the pre-launch picker must offer the models that
-    login can actually drive: Pi's ``models-store.json`` catalog filtered to
-    providers with an ``auth.json`` entry, plus custom providers with an
-    ``apiKey`` in ``models.json``. Apply the ``enabledModels`` curation from
-    ``settings.json`` when it selects anything; Pi falls back to the full
-    catalog when no pattern matches.
-
-    :param agent_dir: Pi agent dir override (tests); defaults to the host's
-        own Pi agent dir.
-    :returns: Picker options shaped like :func:`pi_native_model_options`,
-        qualified as ``provider/model`` — the reference form Pi's ``--model``
-        resolves natively against its own providers.
-    """
-    root = agent_dir if agent_dir is not None else _global_pi_agent_dir()
+def _pi_own_login_models(root: Path) -> list[ScopableModel]:
+    """Read Pi's available model inventory before applying picker curation."""
     logged_in = set(_read_json_object(root / "auth.json"))
     catalogs: list[tuple[str, object]] = [
         (provider_id, payload)
@@ -504,7 +488,28 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
                 name=name if isinstance(name, str) and name else None,
             )
             catalog[entry.reference] = entry
-    entries = list(catalog.values())
+    return list(catalog.values())
+
+
+def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
+    """Enumerate the models Pi's own login can use (the unmanaged fallback).
+
+    When no omnigent-managed provider is configured, the launched Pi runs on
+    its own credentials, so the pre-launch picker must offer the models that
+    login can actually drive: Pi's ``models-store.json`` catalog filtered to
+    providers with an ``auth.json`` entry, plus custom providers with an
+    ``apiKey`` in ``models.json``. Apply the ``enabledModels`` curation from
+    ``settings.json`` when it selects anything; Pi falls back to the full
+    catalog when no pattern matches.
+
+    :param agent_dir: Pi agent dir override (tests); defaults to the host's
+        own Pi agent dir.
+    :returns: Picker options shaped like :func:`pi_native_model_options`,
+        qualified as ``provider/model`` — the reference form Pi's ``--model``
+        resolves natively against its own providers.
+    """
+    root = agent_dir if agent_dir is not None else _global_pi_agent_dir()
+    entries = _pi_own_login_models(root)
     patterns = _pi_enabled_model_patterns(root)
     if patterns:
         scoped = scope_models(patterns, entries)
@@ -559,10 +564,11 @@ def _default_model_provider_id(provider: PiProviderConfig, rendered: _PiModelsCo
 
 
 def pi_own_login_serves_reference(reference: str | None, agent_dir: Path | None = None) -> bool:
-    """Return whether Pi's own logged-in catalog serves the qualified *reference*."""
+    """Check a saved Pi reference independently of the picker shortlist."""
     if not reference:
         return False
-    return any(option["id"] == reference for option in pi_own_login_model_options(agent_dir))
+    root = agent_dir if agent_dir is not None else _global_pi_agent_dir()
+    return any(model.reference == reference for model in _pi_own_login_models(root))
 
 
 def pi_native_model_options(

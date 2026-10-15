@@ -773,14 +773,36 @@ def test_pi_own_login_reference_matches_slash_bearing_model_id(tmp_path: Path) -
     assert not creds.pi_own_login_serves_reference("openrouter/qwen", tmp_path)
 
 
+@pytest.mark.parametrize("curated", [False, True])
+@pytest.mark.parametrize("custom", [False, True])
 def test_resolve_prefers_pi_own_login_for_served_reference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, curated: bool, custom: bool
 ) -> None:
-    _seed_pi_login_catalog(tmp_path, "openai-codex", ["gpt-5.6-sol"])
+    provider_id = "local-gateway" if custom else "openai-codex"
+    selected = f"{provider_id}/gpt-5.6-sol"
+    alternative = f"{provider_id}/picker-model"
+    if custom:
+        (tmp_path / "models.json").write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        provider_id: {
+                            "apiKey": "synthetic",
+                            "models": [{"id": "gpt-5.6-sol"}, {"id": "picker-model"}],
+                        }
+                    }
+                }
+            )
+        )
+    else:
+        _seed_pi_login_catalog(tmp_path, provider_id, ["gpt-5.6-sol", "picker-model"])
+    if curated:
+        (tmp_path / "settings.json").write_text(json.dumps({"enabledModels": [alternative]}))
+        assert [o["id"] for o in creds.pi_own_login_model_options(tmp_path)] == [alternative]
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
 
     provider = creds.resolve_pi_native_provider(
-        model="openai-codex/gpt-5.6-sol", config_loader=_openrouter_default_pi_config
+        model=selected, config_loader=_openrouter_default_pi_config
     )
 
     assert provider is None
