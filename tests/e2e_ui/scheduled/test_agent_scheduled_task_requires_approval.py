@@ -259,9 +259,9 @@ def test_agent_scheduled_task_update_requires_approval(
     page.goto(f"{base_url}/c/{session_id}")
 
     def still_active() -> None:
-        assert _tasks_named(base_url, task_name)[0]["state"] == "active", (
-            "task was paused before approval"
-        )
+        tasks = _tasks_named(base_url, task_name)
+        assert tasks, f"seeded task {task_name!r} disappeared"
+        assert tasks[0]["state"] == "active", "task was paused before approval"
 
     outcome = _drive_gated_turn(
         page, f"Pause the automation '{task_name}'.", _UPDATE_REPLY, still_active

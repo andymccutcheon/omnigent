@@ -363,28 +363,51 @@ SCHEDULED_TASK_APPROVAL_TOOLS: frozenset[str] = frozenset(
 )
 
 
+# Settings a user weighs before approving, shown first in this order so
+# unexpected extra arguments cannot push them out of the prompt.
+_SCHEDULED_TASK_SETTINGS = (
+    "name",
+    "agent_id",
+    "rrule",
+    "timezone",
+    "state",
+    "host_id",
+    "workspace",
+    "execution_target",
+    "permission_mode",
+    "max_cost_usd",
+    "model_override",
+    "reasoning_effort",
+    "prompt",
+)
 _PREVIEW_VALUE_CHARS = 60
-_PREVIEW_TOTAL_CHARS = 400
+_PREVIEW_EXTRA_CHARS = 200
 
 
 def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
-    """``key=value`` pairs for every argument but ``skip``, bounded per value and overall.
+    """``key=value`` pairs for every argument but ``skip``, each value bounded.
 
-    The free-text prompt can be long enough to push the other settings out of
-    the card's truncated argument preview, so it is reported by length only.
+    Known settings come first and are never dropped; other arguments follow and
+    are capped as a group. The free-text prompt can be long enough to push the
+    settings out of the card's truncated argument preview, so it is reported by
+    length only.
     """
-    parts = []
-    for key in sorted(args):
-        if key == skip:
-            continue
+
+    def pair(key: str) -> str:
+        value = str(args[key])
         if key == "prompt":
-            parts.append(f"prompt={len(str(args[key]))} chars")
-        else:
-            parts.append(f"{key}={str(args[key])[:_PREVIEW_VALUE_CHARS]}")
-    summary = ", ".join(parts)
-    if len(summary) > _PREVIEW_TOTAL_CHARS:
-        summary = summary[: _PREVIEW_TOTAL_CHARS - 3] + "..."
-    return summary
+            return f"prompt={len(value)} chars"
+        if len(value) > _PREVIEW_VALUE_CHARS:
+            value = value[: _PREVIEW_VALUE_CHARS - 3] + "..."
+        return f"{key}={value}"
+
+    known = [pair(key) for key in _SCHEDULED_TASK_SETTINGS if key in args and key != skip]
+    extra = ", ".join(
+        pair(key) for key in sorted(args) if key not in _SCHEDULED_TASK_SETTINGS and key != skip
+    )
+    if len(extra) > _PREVIEW_EXTRA_CHARS:
+        extra = extra[: _PREVIEW_EXTRA_CHARS - 3] + "..."
+    return ", ".join([*known, extra] if extra else known)
 
 
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:

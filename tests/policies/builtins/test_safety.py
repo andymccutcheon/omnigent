@@ -624,9 +624,12 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
                 "arguments": {
                     "name": "nightly triage",
                     "prompt": prompt,
-                    "rrule": "FREQ=DAILY;BYHOUR=9",
-                    "agent_id": "ag_1",
-                    "host_id": "host_1",
+                    "rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0",
+                    "timezone": "America/Los_Angeles",
+                    "agent_id": "ag_" + "a" * 70,
+                    "host_id": "host_" + "b" * 70,
+                    "workspace": "/srv/" + "c" * 70,
+                    "model_override": "databricks-" + "d" * 70,
                     "execution_target": "managed_sandbox",
                     "permission_mode": "bypassPermissions",
                     "max_cost_usd": 2.5,
@@ -637,8 +640,11 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
     reason = result["reason"]
     assert result["result"] == "ASK"
     for setting in (
-        "agent_id=ag_1",
-        "host_id=host_1",
+        "agent_id=ag_" + "a" * 54 + "...",
+        "rrule=FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0",
+        "timezone=America/Los_Angeles",
+        "host_id=host_" + "b" * 52 + "...",
+        "workspace=/srv/",
         "execution_target=managed_sandbox",
         "permission_mode=bypassPermissions",
         "max_cost_usd=2.5",
@@ -646,7 +652,7 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
     ):
         assert setting in reason, reason
     assert "Summarize everything." not in reason
-    assert len(reason) < 600
+    assert len(reason) < 800
 
 
 def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
@@ -665,9 +671,9 @@ def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
     )
     assert result["result"] == "ASK"
     assert "'(unnamed)'" in result["reason"]
-    assert result["reason"].count("v" * 61) == 0
-    assert len(result["reason"]) < 500
-    assert "..." in result["reason"]
+    assert result["reason"].count("v" * 58) == 0
+    assert "setting_00=" + "v" * 57 + "..." in result["reason"]
+    assert len(result["reason"]) < 300
 
 
 def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
