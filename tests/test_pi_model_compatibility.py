@@ -161,6 +161,17 @@ def test_generic_model_catalog_outage_keeps_existing_fallbacks(
     assert "contextWindow" not in entry and "maxTokens" not in entry
 
 
+def test_generic_catalog_programming_errors_surface(monkeypatch):
+    from omnigent.models.pi_model_compatibility import pi_generic_model_json_entry
+
+    def invalid(_):
+        raise TypeError("invalid catalog implementation")
+
+    monkeypatch.setattr("omnigent.onboarding.providers.find_catalog_models", invalid)
+    with pytest.raises(TypeError, match="invalid catalog implementation"):
+        pi_generic_model_json_entry("custom-model")
+
+
 @pytest.mark.parametrize("other_reasoning", [False, None])
 def test_generic_model_ambiguous_catalog_does_not_guess_capability(monkeypatch, other_reasoning):
     from omnigent.models.pi_model_compatibility import pi_generic_model_json_entry

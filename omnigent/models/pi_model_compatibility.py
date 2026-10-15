@@ -156,7 +156,7 @@ def pi_generic_model_json_entry(
     from omnigent.onboarding.providers import find_catalog_models
 
     matches = []
-    with suppress(Exception):
+    with suppress(OSError):
         matches = find_catalog_models(model_id)
     reasoning = {model.supports_reasoning for model in matches}
     contexts = {model.max_input_tokens for model in matches if model.max_input_tokens is not None}
@@ -164,9 +164,6 @@ def pi_generic_model_json_entry(
     metadata = ModelMetadata(
         supported_capabilities=(
             frozenset({ModelCapability.REASONING}) if reasoning == {True} else frozenset()
-        ),
-        unsupported_capabilities=(
-            frozenset({ModelCapability.REASONING}) if reasoning == {False} else frozenset()
         ),
         context_window=next(iter(contexts)) if len(contexts) == 1 else None,
         max_output_tokens=next(iter(outputs)) if len(outputs) == 1 else None,

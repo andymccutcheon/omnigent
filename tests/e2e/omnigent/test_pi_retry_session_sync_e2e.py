@@ -167,7 +167,8 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
 
     assert calls == ["remember"]
     if wire_api == "anthropic":
-        budgets = [r["thinking"]["budget_tokens"] for r in requests]
+        budgets = [r.get("thinking", {}).get("budget_tokens") for r in requests]
+        assert all(isinstance(budget, int) for budget in budgets), budgets
         assert budgets[0] == budgets[1] == budgets[2] > budgets[3] > 0
     else:
         efforts = [

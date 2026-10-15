@@ -23,7 +23,7 @@ from omnigent.harnesses.pi_native.credentials import (
     resolve_pi_native_provider,
 )
 from omnigent.onboarding.providers import ModelInfo
-from tests.e2e.conftest import configure_mock_llm, get_mock_requests
+from tests.e2e.conftest import configure_mock_llm, get_mock_requests, reset_mock_llm
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("pi") is None, reason="requires the Pi CLI"),
@@ -179,6 +179,7 @@ def test_generic_provider_delivers_effort_through_native_tool_turn(
         "omnigent.onboarding.providers.find_catalog_models",
         lambda _: [ModelInfo(name=model, provider="openai", supports_reasoning=True)],
     )
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [

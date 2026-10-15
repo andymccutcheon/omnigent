@@ -1890,7 +1890,9 @@ class TestBuildEnvAndDir(unittest.TestCase):
         ):
             executor = PiExecutor(gateway=True)
 
-        config = executor._build_env_and_dir([], None, None, None)
+        config = executor._build_env_and_dir(
+            [], None, None, _build_models_json("https://h.example.com", "tok")
+        )
         try:
             self.assertIn("PI_CODING_AGENT_DIR", config.env)
             managed_dir = Path(config.env["PI_CODING_AGENT_DIR"])
@@ -1963,7 +1965,9 @@ def test_gateway_seeds_managed_settings_from_global_agent(
     ):
         executor = PiExecutor(gateway=True)
 
-    config = executor._build_env_and_dir([], None, None, None)
+    config = executor._build_env_and_dir(
+        [], None, None, _build_models_json("https://h.example.com", "tok")
+    )
     try:
         managed_dir = Path(config.env["PI_CODING_AGENT_DIR"])
         settings = json.loads((managed_dir / "settings.json").read_text(encoding="utf-8"))
@@ -5804,7 +5808,10 @@ def test_generic_reasoning_uses_pi_compat_detection_without_changing_databricks(
             assert provider["compat"]["supportsReasoningEffort"] is False
 
 
-async def test_generic_catalog_discovery_does_not_block_runtime(monkeypatch, tmp_path):
+@pytest.mark.parametrize("destination", ["generic", "mixed-databricks", "catalog"])
+async def test_generic_catalog_discovery_does_not_block_runtime(
+    monkeypatch, tmp_path, destination
+):
     import asyncio
     import threading
 
@@ -5815,6 +5822,7 @@ async def test_generic_catalog_discovery_does_not_block_runtime(monkeypatch, tmp
     heartbeat_ran = False
 
     def discover(model):
+        assert destination == "generic", "unused generic catalog lookup"
         started.set()
         assert release.wait(2), "catalog discovery blocked the runtime event loop"
         return {"id": model, "reasoning": True}
@@ -5838,15 +5846,28 @@ async def test_generic_catalog_discovery_does_not_block_runtime(monkeypatch, tmp
     monkeypatch.setattr(pi_mod, "pi_generic_model_json_entry", discover)
     monkeypatch.setattr(pi_mod, "_create_subprocess_exec", spawn)
     monkeypatch.setattr(pi_mod, "_find_pi_cli", lambda: "/usr/bin/pi")
+    model = "system.ai.gpt-5" if destination == "mixed-databricks" else "custom-model"
+    base_urls = (
+        {
+            "openai": "https://workspace.example/ai-gateway/codex/v1",
+            "claude": "http://generic.example/anthropic",
+        }
+        if destination == "mixed-databricks"
+        else {"openai": "http://generic.example/v1"}
+    )
     executor = PiExecutor(
         gateway=True,
         gateway_host="http://generic.example",
         gateway_auth_command="printf synthetic",
-        base_urls_override={"openai": "http://generic.example/v1"},
-        model="custom-model",
+        base_urls_override=base_urls,
+        model=model,
         cwd=str(tmp_path),
     )
-    beat = asyncio.create_task(heartbeat())
+    executor._gateway_model_wire_apis = {}
+    executor._gateway_model_entries = (
+        (ModelEntry(id=model, family="other"),) if destination == "catalog" else ()
+    )
+    beat = asyncio.create_task(heartbeat()) if destination == "generic" else None
     try:
         events = [
             e
@@ -5858,9 +5879,10 @@ async def test_generic_catalog_discovery_does_not_block_runtime(monkeypatch, tmp
             )
         ]
         assert not [e for e in events if isinstance(e, ExecutorError)]
-        assert heartbeat_ran
+        assert heartbeat_ran is (destination == "generic")
     finally:
         release.set()
-        beat.cancel()
-        await asyncio.gather(beat, return_exceptions=True)
+        if beat is not None:
+            beat.cancel()
+            await asyncio.gather(beat, return_exceptions=True)
         await executor.close()

@@ -719,7 +719,6 @@ def _build_models_json(
     catalog_models: Sequence[model_catalog.ModelEntry] = (),
     model_wire_apis: Mapping[str, frozenset[ModelWireAPI]] | None = None,
     openai_wire_api: str | None = None,
-    generic_model_entry: _JsonObject | None = None,
 ) -> _PiModelsConfig:
     # Pi's models.json mixes str/int/bool/list/dict across provider configs;
     """Build a Pi ``models.json`` with protocol-specific gateway providers.
@@ -747,8 +746,6 @@ def _build_models_json(
         wire surfaces. Missing GPT metadata defaults to Responses.
     :param openai_wire_api: Configured wire for a generic OpenAI-compatible
         provider. ``None`` defaults generic providers to Chat Completions.
-    :param generic_model_entry: Metadata resolved off-loop before SDK startup.
-        Synchronous callers may omit it to resolve metadata here.
     :returns: Pi ``models.json`` contents.
     """
     h = host.rstrip("/")
@@ -897,11 +894,7 @@ def _build_models_json(
                 url == provider["baseUrl"] and not _is_databricks_gateway_base_url(url)
                 for url in (base_urls or {}).values()
             ):
-                entry = (
-                    generic_model_entry
-                    if generic_model_entry is not None
-                    else dict(pi_generic_model_json_entry(model))
-                )
+                entry = dict(pi_generic_model_json_entry(model))
             else:
                 entry = {"id": model, "input": ["text", "image"]}
                 if pi_model_is_reasoning(model):
@@ -2286,8 +2279,7 @@ class PiExecutor(Executor):
         tools: list[ToolSpec],
         tool_server_port: int | None,
         tool_server_token: str | None,
-        model: str | None,
-        generic_model_entry: _JsonObject | None = None,
+        models_json: _PiModelsConfig | None,
     ) -> PiSubprocessConfig:
         """Build env dict, temp dir, and extra CLI args for a Pi subprocess.
 
@@ -2298,29 +2290,16 @@ class PiExecutor(Executor):
             (:attr:`_ToolServer.token`), embedded in the generated
             extension so requests authenticate. Non-``None`` whenever
             *tool_server_port* is.
-        :param model: The resolved model id this subprocess will run, e.g.
-            ``"moonshotai/kimi-k2.6"``; registered in the generated
-            ``models.json`` on the gateway path so the
-            ``provider/<model>`` selector resolves. ``None`` when no model
-            is pinned (Pi picks its own default).
-        :param generic_model_entry: Pre-resolved metadata for a configured model.
+        :param models_json: Provider configuration resolved off-loop before
+            allocating session files; ``None`` for Pi-owned configuration.
         """
+        if self._gateway and models_json is None:
+            raise ValueError("Gateway provider configuration must be resolved before startup")
         env = dict(self._env)
         tmp_dir = tempfile.mkdtemp(prefix="omnigent_pi_")
         extra_args: list[str] = list(self._extra_args)
 
         if self._gateway:
-            effective_model = model
-            models_json = _build_models_json(
-                self._gateway_workspace_url or self._databricks_host,
-                self._databricks_token,
-                self._base_urls_override,
-                model=effective_model,
-                catalog_models=self._gateway_model_entries or (),
-                model_wire_apis=self._gateway_model_wire_apis,
-                openai_wire_api=self._openai_wire_api,
-                generic_model_entry=generic_model_entry,
-            )
             models_path = os.path.join(tmp_dir, "models.json")
             with open(models_path, "w") as f:
                 json.dump(models_json, f)
@@ -2490,17 +2469,17 @@ class PiExecutor(Executor):
             return state.rpc
 
         wire_catalog = await self._load_gateway_model_wire_apis()
-        generic_model_entry: _JsonObject | None = None
-        if (
-            self._gateway
-            and effective_model
-            and any(
-                not _is_databricks_gateway_base_url(url)
-                for url in (self._base_urls_override or {}).values()
-            )
-        ):
-            generic_model_entry = dict(
-                await run_sync_on_thread(pi_generic_model_json_entry, effective_model)
+        models_json = None
+        if self._gateway:
+            models_json = await run_sync_on_thread(
+                _build_models_json,
+                self._gateway_workspace_url or self._databricks_host,
+                self._databricks_token,
+                self._base_urls_override,
+                model=effective_model,
+                catalog_models=self._gateway_model_entries or (),
+                model_wire_apis=wire_catalog,
+                openai_wire_api=self._openai_wire_api,
             )
 
         if state.rpc is not None:
@@ -2509,7 +2488,7 @@ class PiExecutor(Executor):
         tool_server_port = await self._ensure_tool_server(tools)
         tool_server_token = self._tool_server.token if self._tool_server is not None else None
         subprocess_config = self._build_env_and_dir(
-            tools, tool_server_port, tool_server_token, effective_model, generic_model_entry
+            tools, tool_server_port, tool_server_token, models_json
         )
         env = subprocess_config.env
         tmp_dir = subprocess_config.tmp_dir
