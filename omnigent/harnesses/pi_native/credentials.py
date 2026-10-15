@@ -463,10 +463,10 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
     When no omnigent-managed provider is configured, the launched Pi runs on
     its own credentials, so the pre-launch picker must offer the models that
     login can actually drive: Pi's ``models-store.json`` catalog filtered to
-    providers with an ``auth.json`` entry, scoped by the ``enabledModels``
-    curation in Pi's ``settings.json`` when it selects anything (Pi's own
-    pickers cycle exactly that scope; a scope matching nothing means "no
-    curation" to Pi, so the full catalog stays the fallback).
+    providers with an ``auth.json`` entry, plus custom providers with an
+    ``apiKey`` in ``models.json``. Apply the ``enabledModels`` curation from
+    ``settings.json`` when it selects anything; Pi falls back to the full
+    catalog when no pattern matches.
 
     :param agent_dir: Pi agent dir override (tests); defaults to the host's
         own Pi agent dir.
@@ -476,11 +476,19 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
     """
     root = agent_dir if agent_dir is not None else _global_pi_agent_dir()
     logged_in = set(_read_json_object(root / "auth.json"))
-    if not logged_in:
-        return []
+    catalogs: list[tuple[str, object]] = [
+        (provider_id, payload)
+        for provider_id, payload in _read_json_object(root / "models-store.json").items()
+        if provider_id in logged_in
+    ]
+    declared = _read_json_object(root / "models.json").get("providers")
+    for provider_id, payload in declared.items() if _is_str_object_dict(declared) else ():
+        api_key = payload.get("apiKey") if _is_str_object_dict(payload) else None
+        if provider_id in logged_in or (isinstance(api_key, str) and api_key):
+            catalogs.append((provider_id, payload))
     catalog: dict[str, ScopableModel] = {}
-    for provider_id, payload in _read_json_object(root / "models-store.json").items():
-        if provider_id not in logged_in or not _is_str_object_dict(payload):
+    for provider_id, payload in catalogs:
+        if not _is_str_object_dict(payload):
             continue
         models = payload.get("models")
         for model in models if isinstance(models, list) else []:
