@@ -19,11 +19,11 @@ export const ARIA_MOD_KEY = IS_MAC ? "Meta" : "Control";
 export const VIEW_MODE_TOGGLE_KEYS = [MOD_KEY, ALT_KEY, "\\"] as const;
 
 export function newSessionShortcutKeys(native = isNativeShell()): string[] {
-  return native ? [MOD_KEY, ALT_KEY, "N"] : [MOD_KEY, IS_MAC ? SHIFT_KEY : "Shift", "O"];
+  return native ? [MOD_KEY, ALT_KEY, "N"] : [MOD_KEY, ALT_KEY, IS_MAC ? SHIFT_KEY : "Shift", "N"];
 }
 
 export function newSessionAriaShortcut(native = isNativeShell()): string {
-  return `${ARIA_MOD_KEY}+${native ? "Alt+N" : "Shift+O"}`;
+  return `${ARIA_MOD_KEY}+${native ? "Alt+N" : "Alt+Shift+N"}`;
 }
 
 export function composerSendShortcutKeys(submitWithModEnter: boolean): string[] {
