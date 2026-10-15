@@ -364,10 +364,11 @@ SCHEDULED_TASK_APPROVAL_TOOLS: frozenset[str] = frozenset(
 
 
 _PREVIEW_VALUE_CHARS = 60
+_PREVIEW_TOTAL_CHARS = 400
 
 
 def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
-    """``key=value`` pairs for every argument but ``skip``, each value bounded.
+    """``key=value`` pairs for every argument but ``skip``, bounded per value and overall.
 
     The free-text prompt can be long enough to push the other settings out of
     the card's truncated argument preview, so it is reported by length only.
@@ -380,7 +381,10 @@ def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
             parts.append(f"prompt={len(str(args[key]))} chars")
         else:
             parts.append(f"{key}={str(args[key])[:_PREVIEW_VALUE_CHARS]}")
-    return ", ".join(parts)
+    summary = ", ".join(parts)
+    if len(summary) > _PREVIEW_TOTAL_CHARS:
+        summary = summary[: _PREVIEW_TOTAL_CHARS - 3] + "..."
+    return summary
 
 
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
@@ -408,11 +412,12 @@ def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     if not args:
         preview = f"{action} a scheduled task (details unavailable)"
     elif action == "create":
+        name = str(args.get("name") or "(unnamed)")[:_PREVIEW_VALUE_CHARS]
         settings = _scheduled_task_settings(args, skip="name")
-        preview = f"create scheduled task {args.get('name', '')!r} ({settings or 'no settings'})"
+        preview = f"create scheduled task {name!r} ({settings or 'no settings'})"
     else:
+        task_id = str(args.get("scheduled_task_id") or "(no id)")[:_PREVIEW_VALUE_CHARS]
         settings = _scheduled_task_settings(args, skip="scheduled_task_id")
-        task_id = args.get("scheduled_task_id", "")
         preview = f"update scheduled task {task_id} ({settings or 'no fields'})"
     return {
         "result": "ASK",

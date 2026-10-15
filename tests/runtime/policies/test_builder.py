@@ -109,8 +109,10 @@ name: no-guardrails
     )
     # No user-declared guardrails, but the hardcoded approval guards
     # are always present.
-    assert len(engine.policies) == 2
-    assert engine.policies[0].spec.name == "__ask_on_add_policy"
+    assert [p.spec.name for p in engine.policies] == [
+        "__ask_on_add_policy",
+        "__ask_on_scheduled_task_change",
+    ]
     assert engine.label_defs == {}
     assert engine.labels == {}
 
@@ -139,8 +141,10 @@ guardrails: {}
         conversation_store=conversation_store,
     )
     # Mandatory approval guards remain even without configured policies.
-    assert len(engine.policies) == 2
-    assert engine.policies[0].spec.name == "__ask_on_add_policy"
+    assert [p.spec.name for p in engine.policies] == [
+        "__ask_on_add_policy",
+        "__ask_on_scheduled_task_change",
+    ]
     assert engine.label_defs == {}
     assert engine.labels == {}
 
@@ -633,10 +637,9 @@ def test_empty_default_policies_preserves_existing_behaviour(
         default_policies=[],
     )
     # Only the two hardcoded approval guards.
-    assert len(engine_none.policies) == 2
-    assert engine_none.policies[0].spec.name == "__ask_on_add_policy"
-    assert len(engine_empty.policies) == 2
-    assert engine_empty.policies[0].spec.name == "__ask_on_add_policy"
+    guards = ["__ask_on_add_policy", "__ask_on_scheduled_task_change"]
+    assert [p.spec.name for p in engine_none.policies] == guards
+    assert [p.spec.name for p in engine_empty.policies] == guards
 
 
 # ── Sub-agent cost roll-up (subtree usage aggregation) ──

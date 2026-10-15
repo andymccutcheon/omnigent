@@ -185,13 +185,15 @@ def scheduling_session(
         assert not _tasks_named(live_server, task_name)
         yield (live_server, session_id, model, task_name)
     finally:
-        for task in _tasks_named(live_server, task_name):
-            httpx.delete(f"{live_server}/v1/scheduled-tasks/{task['id']}", timeout=10.0)
-        if session_id is not None:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        if respawned is not None:
-            respawned.terminate()
-            respawned.wait(timeout=5)
+        try:
+            for task in _tasks_named(live_server, task_name):
+                httpx.delete(f"{live_server}/v1/scheduled-tasks/{task['id']}", timeout=10.0)
+            if session_id is not None:
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        finally:
+            if respawned is not None:
+                respawned.terminate()
+                respawned.wait(timeout=5)
 
 
 @pytest.mark.timeout(300)

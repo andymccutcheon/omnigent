@@ -649,6 +649,27 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
     assert len(reason) < 600
 
 
+def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
+    """Many long arguments and a missing name still give a short, readable reason."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_create",
+            "data": {
+                "name": "sys_scheduled_task_create",
+                "arguments": {f"setting_{i:02d}": "v" * 80 for i in range(20)},
+            },
+        }
+    )
+    assert result["result"] == "ASK"
+    assert "'(unnamed)'" in result["reason"]
+    assert result["reason"].count("v" * 61) == 0
+    assert len(result["reason"]) < 500
+    assert "..." in result["reason"]
+
+
 def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
     """An update call ASKs and names the task id and the fields it changes."""
     from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
