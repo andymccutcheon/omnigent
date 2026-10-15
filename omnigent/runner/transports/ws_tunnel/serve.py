@@ -134,6 +134,11 @@ _TUNNEL_RECYCLE_HTTP_STATUSES = {502}
 _RECYCLE_RECONNECT_MIN_S = 0.5
 _RECYCLE_RECONNECT_MAX_S = 3.0
 _RUNNER_TUNNEL_CLOSE_TIMEOUT_S = 0.25
+_RUNNER_TUNNEL_OPEN_TIMEOUT_S = 10.0
+# In-flight requests can own inference; preserve their existing keepalive tolerance.
+_RUNNER_TUNNEL_REQUEST_SILENCE_TIMEOUT_S = (
+    TUNNEL_KEEPALIVE_PING_INTERVAL_S + TUNNEL_KEEPALIVE_PING_TIMEOUT_S
+)
 # Close timeout for a *graceful* (idle-reaper) shutdown. Larger than the
 # snappy reconnect close above because completing the WebSocket close
 # handshake is what confirms the server read our end-of-stream ([DONE])
@@ -149,6 +154,27 @@ _GRACEFUL_SHUTDOWN_CLOSE_TIMEOUT_S = 5.0
 # cancelled — a stuck stream must not wedge shutdown forever.
 _GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT_S = 5.0
 RUNNER_TUNNEL_REJECTION_PREFIX = "runner tunnel rejected by server "
+# Raised instead of the rejection above when the runner had no credential
+# to send, so the message names the local cause rather than the server.
+RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX = "runner tunnel has no credential available "
+
+
+def _reauth_hint(server_url: str | None) -> str:
+    """Build the re-authentication hint for a fatal tunnel auth failure.
+
+    :param server_url: The runner's server URL, e.g.
+        ``"https://ws.databricks.com/api/2.0/omnigent"``, or ``None``.
+    :returns: e.g. ``"run `omnigent login https://ws.databricks.com/omnigent`
+        to re-authenticate"``.
+    """
+    if not server_url:
+        return "check remote server authentication"
+    # `omnigent login` detects the fronting workspace itself; the display
+    # form keeps ``?o=``, which selects the workspace on multi-workspace hosts.
+    from omnigent.util.server_url import display_server_url
+
+    return f"run `{cli_invocation()} login {display_server_url(server_url)}` to re-authenticate"
+
 
 # Schemes that, when surfaced through ``InvalidURI.uri``, indicate
 # the WebSocket upgrade request was redirected somewhere the
@@ -512,18 +538,13 @@ async def serve_tunnel(
                 # fresh token each attempt, so the session survives
                 # once credentials become valid again.
                 if not ever_connected and login_redirect_streak >= _LOGIN_REDIRECT_FATAL_ATTEMPTS:
-                    # Show the display form (workspace /omnigent URL, ?o=
-                    # when known), not the internal API mount; it round-trips
-                    # through `omnigent login` to the same server.
-                    from omnigent.util.server_url import display_server_url
-
                     raise RuntimeError(
                         f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
                         f"(redirect to non-WebSocket URL {redirect_url} "
                         f"persisted across {login_redirect_streak} attempts); "
                         "the server likely requires auth — "
-                        f"run `{cli_invocation()} login {display_server_url(server_url)}` or "
-                        f"`{cli_invocation()} setup` to configure credentials"
+                        f"{_reauth_hint(server_url)}, or "
+                        f"run `{cli_invocation()} setup` to configure credentials"
                     ) from exc
                 retry_reason = (
                     f"login-page redirect during upgrade ({redirect_url}); "
@@ -535,27 +556,31 @@ async def serve_tunnel(
                     http_auth_rejection_streak += 1
                     if (
                         not ever_connected
+                        and auth_token is None
+                        and auth_token_factory is not None
+                        and not getattr(auth_token_factory, "declined", False)
                         and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
                     ):
-                        if server_url:
-                            # `omnigent login` detects the fronting workspace
-                            # itself — unlike a raw `databricks auth login
-                            # --host`, which would need the workspace host,
-                            # not the server URL (for workspace-hosted
-                            # servers the API mount is the wrong --host).
-                            from omnigent.util.server_url import display_server_url
-
-                            login_hint = (
-                                f"run `omnigent login {display_server_url(server_url)}` "
-                                "to re-authenticate"
-                            )
-                        else:
-                            login_hint = "check remote server authentication"
+                        # Same streak as the rejection below: a transient mint
+                        # failure (factory returned None) still gets the loop-top
+                        # re-mint; only the message names the local cause.
+                        raise RuntimeError(
+                            f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}"
+                            f"(HTTP {http_status} persisted across "
+                            f"{http_auth_rejection_streak} unauthenticated attempts; the "
+                            "credential source returned no token, e.g. the host "
+                            "credential service's grant expired or was rejected); "
+                            f"{_reauth_hint(server_url)}"
+                        ) from exc
+                    if (
+                        not ever_connected
+                        and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
+                    ):
                         raise RuntimeError(
                             f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
                             f"(HTTP {http_status} persisted across "
                             f"{http_auth_rejection_streak} attempts); "
-                            f"{login_hint}"
+                            f"{_reauth_hint(server_url)}"
                         ) from exc
                     # Invalidate the cached token so the loop-top _refresh_auth_token
                     # fetches a fresh one on the next attempt. The loop-top call is
@@ -991,6 +1016,7 @@ async def _serve_tunnel_once(
     import websockets
 
     dispatch_tasks: dict[str, asyncio.Task[None]] = {}
+    passive_dispatch_tasks: set[asyncio.Task[None]] = set()
     ws_channels: dict[str, _RunnerWSChannel] = {}
     # Identify as a first-party client so the server's WebSocket origin
     # guard (CSWSH protection) allows the handshake — this runner is not a
@@ -1047,6 +1073,7 @@ async def _serve_tunnel_once(
         websockets.connect(
             tunnel_url,
             additional_headers=headers,
+            open_timeout=_RUNNER_TUNNEL_OPEN_TIMEOUT_S,
             close_timeout=close_timeout,
             max_size=RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
             ssl=ssl_ctx,
@@ -1069,29 +1096,47 @@ async def _serve_tunnel_once(
             await diagnostics.send(ws.send, data)
 
         async def receive_frame() -> str | bytes:
-            try:
-                async with asyncio.timeout(RUNNER_TUNNEL_SILENCE_TIMEOUT_S):
-                    return await ws.recv()
-            except TimeoutError as exc:
-                if shutdown_event is None or not shutdown_event.is_set():
-                    _logger.warning(
-                        "Runner %s received no server frame for %.0fs; reconnecting",
-                        runner_id,
-                        RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
-                        extra=debug_event(
-                            "runner_server_silence_timeout",
-                            session_id=runner_primary_session_id(),
-                            runner_id=runner_id,
-                            connection_id=connection_id,
-                            silence_timeout_s=RUNNER_TUNNEL_SILENCE_TIMEOUT_S,
-                            **diagnostics.snapshot(),
-                        ),
-                    )
-                    transport = getattr(ws, "transport", None)
-                    if transport is not None:
-                        with contextlib.suppress(Exception):
-                            transport.abort()
-                raise ConnectionError("server application ping timeout; reconnecting") from exc
+            started = asyncio.get_running_loop().time()
+            silence_timeout = RUNNER_TUNNEL_SILENCE_TIMEOUT_S
+            while True:
+                diagnostics.settings["app_silence_timeout_s"] = silence_timeout
+                try:
+                    async with asyncio.timeout_at(started + silence_timeout):
+                        return await ws.recv()
+                except TimeoutError as exc:
+                    # Only event subscriptions are known to detach safely;
+                    # recheck request ownership when the fast deadline expires.
+                    if silence_timeout < _RUNNER_TUNNEL_REQUEST_SILENCE_TIMEOUT_S and (
+                        any(
+                            not task.done() and task not in passive_dispatch_tasks
+                            for task in dispatch_tasks.values()
+                        )
+                        or any(
+                            channel.task is None or not channel.task.done()
+                            for channel in ws_channels.values()
+                        )
+                    ):
+                        silence_timeout = _RUNNER_TUNNEL_REQUEST_SILENCE_TIMEOUT_S
+                        continue
+                    if shutdown_event is None or not shutdown_event.is_set():
+                        _logger.warning(
+                            "Runner %s received no server frame for %.0fs; reconnecting",
+                            runner_id,
+                            silence_timeout,
+                            extra=debug_event(
+                                "runner_server_silence_timeout",
+                                session_id=runner_primary_session_id(),
+                                runner_id=runner_id,
+                                connection_id=connection_id,
+                                silence_timeout_s=silence_timeout,
+                                **diagnostics.snapshot(),
+                            ),
+                        )
+                        transport = getattr(ws, "transport", None)
+                        if transport is not None:
+                            with contextlib.suppress(Exception):
+                                transport.abort()
+                    raise ConnectionError("server application ping timeout; reconnecting") from exc
 
         if on_connected is not None:
             on_connected()
@@ -1183,6 +1228,7 @@ async def _serve_tunnel_once(
                         on_activity=on_activity,
                         event_dispatcher=event_dispatcher,
                         diagnostics=diagnostics,
+                        passive_dispatch_tasks=passive_dispatch_tasks,
                     )
             else:
                 # Race reads against the shutdown signal. When it fires,
@@ -1249,6 +1295,7 @@ async def _serve_tunnel_once(
                             on_activity=on_activity,
                             event_dispatcher=event_dispatcher,
                             diagnostics=diagnostics,
+                            passive_dispatch_tasks=passive_dispatch_tasks,
                         )
                 finally:
                     shutdown_wait.cancel()
@@ -1402,6 +1449,7 @@ async def _handle_tunnel_frame(
     on_activity: Callable[[], None] | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
     diagnostics: TunnelDiagnostics | None = None,
+    passive_dispatch_tasks: set[asyncio.Task[None]] | None = None,
 ) -> None:
     """Handle one server-to-runner tunnel frame.
 
@@ -1417,6 +1465,7 @@ async def _handle_tunnel_frame(
     :param on_activity: Optional sync callback fired for non-ping
         frames that represent real runner work.
     :param diagnostics: Connection-local application frame and heartbeat observations.
+    :param passive_dispatch_tasks: Connection-owned subscriptions that can safely reconnect.
     :returns: None.
     """
     if diagnostics is not None:
@@ -1451,6 +1500,17 @@ async def _handle_tunnel_frame(
             name=f"ws-tunnel-dispatch:{frame.id}",
         )
         dispatch_tasks[frame.id] = task
+        path = frame.path.split("?", 1)[0].split("/")
+        if (
+            passive_dispatch_tasks is not None
+            and frame.method == "GET"
+            and len(path) == 5
+            and path[:3] == ["", "v1", "sessions"]
+            and path[3]
+            and path[4] == "stream"
+        ):
+            passive_dispatch_tasks.add(task)
+            task.add_done_callback(passive_dispatch_tasks.discard)
         task.add_done_callback(_forget_dispatch_task(dispatch_tasks, frame.id))
     elif isinstance(frame, RequestCancelFrame):
         if on_activity is not None:

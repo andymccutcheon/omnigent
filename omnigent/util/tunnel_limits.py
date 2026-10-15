@@ -35,11 +35,9 @@ RUNNER_TUNNEL_MAX_MESSAGE_BYTES = 100 * 1024 * 1024
 TUNNEL_KEEPALIVE_PING_INTERVAL_S = 30.0
 TUNNEL_KEEPALIVE_PING_TIMEOUT_S = 90.0
 
-# Application frames prove the server is reachable beyond a proxy that answers
-# protocol pings itself. Preserve the existing protocol detection window.
-RUNNER_TUNNEL_SILENCE_TIMEOUT_S = (
-    TUNNEL_KEEPALIVE_PING_INTERVAL_S + TUNNEL_KEEPALIVE_PING_TIMEOUT_S
-)
+# Two missed application heartbeats recover idle/subscription-only tunnels
+# within an old server's 90-second grace. Request-owned work keeps its tolerance.
+RUNNER_TUNNEL_SILENCE_TIMEOUT_S = 2 * TUNNEL_KEEPALIVE_PING_INTERVAL_S
 
 
 class UvicornTunnelKwargs(TypedDict):
