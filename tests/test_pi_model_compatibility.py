@@ -10,6 +10,7 @@ from omnigent.models.pi_model_compatibility import (
     enrich_databricks_model_catalog,
     pi_model_json_entry,
 )
+from omnigent.onboarding.providers import ModelInfo
 
 _REASONING = frozenset({ModelCapability.REASONING})
 
@@ -117,3 +118,69 @@ def test_enriched_live_entry_carries_catalog_reasoning() -> None:
         "contextWindow": 400_000,
         "reasoning": True,
     }
+
+
+@pytest.mark.parametrize("reasoning", [True, False, None])
+@pytest.mark.parametrize("configured_limits", [False, True])
+def test_generic_model_metadata_preserves_capability_and_limit_precedence(
+    monkeypatch: pytest.MonkeyPatch, reasoning: bool | None, configured_limits: bool
+) -> None:
+    from omnigent.models.pi_model_compatibility import pi_generic_model_json_entry
+
+    catalog = ModelInfo(
+        name="custom-reasoning-model",
+        provider="openai",
+        supports_reasoning=reasoning,
+        max_input_tokens=200_000,
+        max_output_tokens=16_000,
+    )
+    monkeypatch.setattr("omnigent.onboarding.providers.find_catalog_models", lambda _: [catalog])
+    entry = pi_generic_model_json_entry(
+        catalog.name,
+        configured_context_window=123_000 if configured_limits else None,
+        configured_max_output_tokens=8_000 if configured_limits else None,
+    )
+    assert (entry.get("reasoning") is True) is (reasoning is True)
+    assert entry["contextWindow"] == (123_000 if configured_limits else 200_000)
+    assert entry["maxTokens"] == (8_000 if configured_limits else 16_000)
+
+
+@pytest.mark.parametrize("model", ["unknown-model", "deepseek-test", "claude-test"])
+def test_generic_model_catalog_outage_keeps_existing_fallbacks(
+    monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    from omnigent.models.pi_model_compatibility import pi_generic_model_json_entry
+
+    def unavailable(_):
+        raise OSError("catalog unavailable")
+
+    monkeypatch.setattr("omnigent.onboarding.providers.find_catalog_models", unavailable)
+    entry = pi_generic_model_json_entry(model)
+    assert entry["id"] == model
+    assert (entry.get("reasoning") is True) is (model != "unknown-model")
+    assert "contextWindow" not in entry and "maxTokens" not in entry
+
+
+@pytest.mark.parametrize("other_reasoning", [False, None])
+def test_generic_model_ambiguous_catalog_does_not_guess_capability(monkeypatch, other_reasoning):
+    from omnigent.models.pi_model_compatibility import pi_generic_model_json_entry
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.providers.find_catalog_models",
+        lambda _: [
+            ModelInfo(
+                name="custom-a",
+                provider="openai",
+                supports_reasoning=True,
+                max_input_tokens=100_000,
+            ),
+            ModelInfo(
+                name="custom-b",
+                provider="openai",
+                supports_reasoning=other_reasoning,
+                max_input_tokens=200_000,
+            ),
+        ],
+    )
+    entry = pi_generic_model_json_entry("custom-model")
+    assert "reasoning" not in entry and "contextWindow" not in entry

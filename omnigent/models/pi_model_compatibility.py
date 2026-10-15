@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import replace
 from enum import Enum
 from typing import TYPE_CHECKING, NotRequired, TypedDict
@@ -136,6 +137,45 @@ def pi_model_json_entry(model: ModelEntry) -> PiModelEntry:
         entry["maxTokens"] = model.metadata.max_output_tokens
     if pi_model_entry_is_reasoning(model):
         entry["reasoning"] = True
+    return entry
+
+
+def pi_generic_model_json_entry(
+    model_id: str,
+    *,
+    configured_context_window: int | None = None,
+    configured_max_output_tokens: int | None = None,
+) -> PiModelEntry:
+    """Render a configured model with catalog capabilities and token limits.
+
+    Native and SDK providers share the same metadata even when the user supplies
+    both limits. Configured limits override catalog values; an unavailable
+    catalog retains the model and Pi's defaults.
+    """
+    from omnigent.models.model_catalog import ModelEntry
+    from omnigent.onboarding.providers import find_catalog_models
+
+    matches = []
+    with suppress(Exception):
+        matches = find_catalog_models(model_id)
+    reasoning = {model.supports_reasoning for model in matches}
+    contexts = {model.max_input_tokens for model in matches if model.max_input_tokens is not None}
+    outputs = {model.max_output_tokens for model in matches if model.max_output_tokens is not None}
+    metadata = ModelMetadata(
+        supported_capabilities=(
+            frozenset({ModelCapability.REASONING}) if reasoning == {True} else frozenset()
+        ),
+        unsupported_capabilities=(
+            frozenset({ModelCapability.REASONING}) if reasoning == {False} else frozenset()
+        ),
+        context_window=next(iter(contexts)) if len(contexts) == 1 else None,
+        max_output_tokens=next(iter(outputs)) if len(outputs) == 1 else None,
+    )
+    entry = pi_model_json_entry(ModelEntry(id=model_id, family="other", metadata=metadata))
+    if configured_context_window is not None:
+        entry["contextWindow"] = configured_context_window
+    if configured_max_output_tokens is not None:
+        entry["maxTokens"] = configured_max_output_tokens
     return entry
 
 

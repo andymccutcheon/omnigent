@@ -5784,3 +5784,83 @@ def test_build_models_json_catalog_reasoning_models_get_reasoning_flag() -> None
     assert by_id["system.ai.gpt-6-luna"].get("reasoning") is True
     assert by_id["system.ai.gemini-3-8-flash"].get("reasoning") is True
     assert "reasoning" not in by_id["system.ai.llama-4-maverick"]
+
+
+@pytest.mark.parametrize("wire_api", ["chat", "responses"])
+def test_generic_reasoning_uses_pi_compat_detection_without_changing_databricks(wire_api):
+    generic = _build_models_json(
+        "https://gateway.example",
+        "synthetic",
+        {"openai": "https://gateway.example/v1"},
+        model="deepseek-test",
+        openai_wire_api=wire_api,
+    )
+    selected = next(p for p in generic["providers"].values() if p["models"])
+    assert "supportsReasoningEffort" not in selected["compat"]
+    assert selected["models"][0]["reasoning"] is True
+    databricks = _build_models_json("https://workspace.example", "synthetic")
+    for provider in databricks["providers"].values():
+        if provider["api"].startswith("openai"):
+            assert provider["compat"]["supportsReasoningEffort"] is False
+
+
+async def test_generic_catalog_discovery_does_not_block_runtime(monkeypatch, tmp_path):
+    import asyncio
+    import threading
+
+    from omnigent.inner import pi_executor as pi_mod
+
+    started = threading.Event()
+    release = threading.Event()
+    heartbeat_ran = False
+
+    def discover(model):
+        started.set()
+        assert release.wait(2), "catalog discovery blocked the runtime event loop"
+        return {"id": model, "reasoning": True}
+
+    async def heartbeat():
+        nonlocal heartbeat_ran
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        heartbeat_ran = True
+        release.set()
+
+    async def spawn(*args, **kwargs):
+        return _FakeProcess(
+            stdout_lines=[
+                _levels_response(["off", "low", "high"]),
+                json.dumps({"type": "response", "command": "prompt", "success": True}),
+                json.dumps({"type": "agent_end", "messages": []}),
+            ]
+        )
+
+    monkeypatch.setattr(pi_mod, "pi_generic_model_json_entry", discover)
+    monkeypatch.setattr(pi_mod, "_create_subprocess_exec", spawn)
+    monkeypatch.setattr(pi_mod, "_find_pi_cli", lambda: "/usr/bin/pi")
+    executor = PiExecutor(
+        gateway=True,
+        gateway_host="http://generic.example",
+        gateway_auth_command="printf synthetic",
+        base_urls_override={"openai": "http://generic.example/v1"},
+        model="custom-model",
+        cwd=str(tmp_path),
+    )
+    beat = asyncio.create_task(heartbeat())
+    try:
+        events = [
+            e
+            async for e in executor.run_turn(
+                [{"role": "user", "content": "hello", "session_id": "generic"}],
+                [],
+                "system",
+                ExecutorConfig(extra={"reasoning_effort": "high"}),
+            )
+        ]
+        assert not [e for e in events if isinstance(e, ExecutorError)]
+        assert heartbeat_ran
+    finally:
+        release.set()
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
+        await executor.close()

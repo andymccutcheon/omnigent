@@ -65,6 +65,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time as _time_mod
@@ -147,7 +148,9 @@ def _response_usage(output_tokens: int, overrides: dict | None = None) -> dict:
     return usage
 
 
-def sse_text_response(text: str, model: str = "mock-model", usage: dict | None = None) -> str:
+def sse_text_response(
+    text: str, model: str = "mock-model", usage: dict | None = None, *, stream: bool = False
+) -> str:
     """
     Build a complete SSE stream for a simple text response.
 
@@ -205,8 +208,24 @@ def sse_text_response(text: str, model: str = "mock-model", usage: dict | None =
     _add(
         "response.output_item.added",
         output_index=0,
-        item=message_item,
+        item={**message_item, "status": "in_progress", "content": []} if stream else message_item,
     )
+    if stream:
+        _add(
+            "response.content_part.added",
+            output_index=0,
+            item_id=msg_id,
+            content_index=0,
+            part={"type": "output_text", "text": "", "annotations": []},
+        )
+        for chunk in re.findall(r"\S+\s*|\s+", text):
+            _add(
+                "response.output_text.delta",
+                output_index=0,
+                item_id=msg_id,
+                content_index=0,
+                delta=chunk,
+            )
     _add(
         "response.output_text.done",
         output_index=0,
@@ -360,12 +379,7 @@ def sse_streaming_text(text: str, model: str = "mock-model", usage: dict | None 
     :param usage: Optional token-usage overrides.
     :returns: SSE-formatted string with delta events.
     """
-    events = []
-    for word in text.split():
-        delta = {"delta": word + " "}
-        events.append(f"event: response.output_text.delta\ndata: {json.dumps(delta)}\n\n")
-    events.append(sse_text_response(text, model, usage))
-    return "".join(events)
+    return sse_text_response(text, model, usage, stream=True)
 
 
 def sse_text_with_native_items(

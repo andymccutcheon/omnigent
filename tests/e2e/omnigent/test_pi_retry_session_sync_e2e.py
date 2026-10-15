@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from omnigent.inner.executor import ExecutorError, TextChunk, TurnComplete
+from omnigent.inner.executor import ExecutorConfig, ExecutorError, TextChunk, TurnComplete
 from omnigent.inner.pi_harness import _build_pi_executor
+from omnigent.onboarding.providers import ModelInfo
 from tests.e2e._harness_probes import skip_if_harness_cli_missing
 from tests.e2e.conftest import configure_mock_llm, get_mock_requests, reset_mock_llm
 
@@ -40,9 +41,21 @@ _STALE_HARNESS_ENV = (
 )
 
 
-async def _run_turn(executor, prompt: str) -> list:
+async def _run_turn(executor, prompt: str, effort: str) -> list:
     messages = [{"role": "user", "content": prompt, "session_id": _SESSION_ID}]
-    return [event async for event in executor.run_turn(messages, [], _SYSTEM_PROMPT)]
+    tools = [
+        {
+            "name": "remember",
+            "description": "Remember a value",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    return [
+        event
+        async for event in executor.run_turn(
+            messages, tools, _SYSTEM_PROMPT, ExecutorConfig(extra={"reasoning_effort": effort})
+        )
+    ]
 
 
 def _streamed_text(events: list) -> str:
@@ -54,22 +67,33 @@ def _errors(events: list) -> list[str]:
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.parametrize("wire_api", ["chat", "responses", "anthropic"])
 async def test_pi_session_stays_in_sync_after_retry_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mock_llm_server_url: str,
+    wire_api: str,
 ) -> None:
     """The prompt after a retry-recovered turn gets only its own answer."""
     skip_if_harness_cli_missing("pi")
 
     mock_model = "mock-pi-retry-session-sync"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("omnigent.inner.pi_settings.DEFAULT_PI_AGENT_DIR", home / ".pi/agent")
+    monkeypatch.setattr(
+        "omnigent.onboarding.providers.find_catalog_models",
+        lambda _: [ModelInfo(name=mock_model, provider="openai", supports_reasoning=True)],
+    )
     reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
             {"error": _RETRYABLE_ERROR, "status_code": 503},
-            {"text": _FIRST_ANSWER},
-            {"text": _SECOND_ANSWER},
+            {"tool_calls": [{"call_id": "remember-1", "name": "remember", "arguments": "{}"}]},
+            {"text": _FIRST_ANSWER, "stream": True},
+            {"text": _SECOND_ANSWER, "stream": True},
         ],
         key=mock_model,
     )
@@ -78,7 +102,12 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     monkeypatch.setenv("HARNESS_PI_MODEL", mock_model)
     monkeypatch.setenv("HARNESS_PI_GATEWAY", "true")
     monkeypatch.setenv(
-        "HARNESS_PI_GATEWAY_BASE_URLS", json.dumps({"openai": f"{mock_llm_server_url}/v1"})
+        "HARNESS_PI_GATEWAY_BASE_URLS",
+        json.dumps(
+            {"claude": mock_llm_server_url}
+            if wire_api == "anthropic"
+            else {"openai": f"{mock_llm_server_url}/v1"}
+        ),
     )
     monkeypatch.setenv("HARNESS_PI_GATEWAY_HOST", mock_llm_server_url)
     monkeypatch.setenv("HARNESS_PI_GATEWAY_AUTH_COMMAND", "printf %s mock-key")
@@ -87,10 +116,21 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     for name in _STALE_HARNESS_ENV:
         monkeypatch.delenv(name, raising=False)
 
+    if wire_api != "anthropic":
+        monkeypatch.setenv("HARNESS_PI_GATEWAY_OPENAI_WIRE_API", wire_api)
     executor = _build_pi_executor()
+    calls = []
+
+    async def remember(name, arguments, *, call_id):
+        calls.append(name)
+        return {"value": "REMEMBERED_PI_VALUE"}
+
+    executor._tool_executor = remember
     try:
-        first = await _run_turn(executor, _FIRST_PROMPT)
-        second = await _run_turn(executor, _SECOND_PROMPT)
+        first = await _run_turn(executor, _FIRST_PROMPT, "high")
+        pid = executor._session_states[_SESSION_ID].rpc.process.pid
+        second = await _run_turn(executor, _SECOND_PROMPT, "low")
+        assert executor._session_states[_SESSION_ID].rpc.process.pid == pid
     finally:
         await executor.close()
 
@@ -120,7 +160,22 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     )
 
     requests = get_mock_requests(mock_llm_server_url)
-    assert len(requests) == 3, (
-        f"expected the 503 call, pi's retry and the second prompt; got {len(requests)} "
+    assert len(requests) == 4, (
+        f"expected the retry, tool continuation and second prompt; got {len(requests)} "
         "provider call(s)"
     )
+
+    assert calls == ["remember"]
+    if wire_api == "anthropic":
+        budgets = [r["thinking"]["budget_tokens"] for r in requests]
+        assert budgets[0] == budgets[1] == budgets[2] > budgets[3] > 0
+    else:
+        efforts = [
+            r.get("reasoning_effort")
+            if wire_api == "chat"
+            else r.get("reasoning", {}).get("effort")
+            for r in requests
+        ]
+        assert efforts == ["high", "high", "high", "low"]
+    history = json.dumps(requests[-1].get("messages", requests[-1].get("input")))
+    assert "REMEMBERED_PI_VALUE" in history and _FIRST_ANSWER in history

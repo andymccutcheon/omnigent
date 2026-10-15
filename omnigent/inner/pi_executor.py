@@ -65,6 +65,7 @@ from omnigent.models.pi_model_compatibility import (
     SYSTEM_AI_RESPONSES_KEYWORDS,
     databricks_model_aliases,
     enrich_databricks_model_catalog,
+    pi_generic_model_json_entry,
     pi_model_is_reasoning,
     pi_model_json_entry,
     unsupported_in_pi,
@@ -718,6 +719,7 @@ def _build_models_json(
     catalog_models: Sequence[model_catalog.ModelEntry] = (),
     model_wire_apis: Mapping[str, frozenset[ModelWireAPI]] | None = None,
     openai_wire_api: str | None = None,
+    generic_model_entry: _JsonObject | None = None,
 ) -> _PiModelsConfig:
     # Pi's models.json mixes str/int/bool/list/dict across provider configs;
     """Build a Pi ``models.json`` with protocol-specific gateway providers.
@@ -745,6 +747,8 @@ def _build_models_json(
         wire surfaces. Missing GPT metadata defaults to Responses.
     :param openai_wire_api: Configured wire for a generic OpenAI-compatible
         provider. ``None`` defaults generic providers to Chat Completions.
+    :param generic_model_entry: Metadata resolved off-loop before SDK startup.
+        Synchronous callers may omit it to resolve metadata here.
     :returns: Pi ``models.json`` contents.
     """
     h = host.rstrip("/")
@@ -776,7 +780,7 @@ def _build_models_json(
         "supportsDeveloperRole": False,
         "supportsStore": False,
         "supportsStrictMode": False,
-        "supportsReasoningEffort": False,
+        **({} if is_generic_provider else {"supportsReasoningEffort": False}),
     }
     provider_models: dict[str, list[_JsonObject]] = {
         "databricks-openai": [],
@@ -859,7 +863,7 @@ def _build_models_json(
                     "supportsDeveloperRole": False,
                     "supportsStore": False,
                     "supportsStrictMode": False,
-                    "supportsReasoningEffort": False,
+                    **({} if is_generic_provider else {"supportsReasoningEffort": False}),
                     # Gemini/Qwen/Llama/inkling models reject stream_options
                     # (which carries include_usage) with 400 "unknown field".
                     "supportsUsageInStreaming": False,
@@ -889,9 +893,19 @@ def _build_models_json(
             # provider-side 400 on image turns — a deliberate trade (loud error
             # over silent loss), since most current gateway models are
             # multimodal and text-only turns are unaffected.
-            entry: _JsonObject = {"id": model, "input": ["text", "image"]}
-            if pi_model_is_reasoning(model):
-                entry["reasoning"] = True
+            if any(
+                url == provider["baseUrl"] and not _is_databricks_gateway_base_url(url)
+                for url in (base_urls or {}).values()
+            ):
+                entry = (
+                    generic_model_entry
+                    if generic_model_entry is not None
+                    else dict(pi_generic_model_json_entry(model))
+                )
+            else:
+                entry = {"id": model, "input": ["text", "image"]}
+                if pi_model_is_reasoning(model):
+                    entry["reasoning"] = True
             provider["models"] = [*provider["models"], entry]
     return config
 
@@ -2273,6 +2287,7 @@ class PiExecutor(Executor):
         tool_server_port: int | None,
         tool_server_token: str | None,
         model: str | None,
+        generic_model_entry: _JsonObject | None = None,
     ) -> PiSubprocessConfig:
         """Build env dict, temp dir, and extra CLI args for a Pi subprocess.
 
@@ -2288,6 +2303,7 @@ class PiExecutor(Executor):
             ``models.json`` on the gateway path so the
             ``provider/<model>`` selector resolves. ``None`` when no model
             is pinned (Pi picks its own default).
+        :param generic_model_entry: Pre-resolved metadata for a configured model.
         """
         env = dict(self._env)
         tmp_dir = tempfile.mkdtemp(prefix="omnigent_pi_")
@@ -2303,6 +2319,7 @@ class PiExecutor(Executor):
                 catalog_models=self._gateway_model_entries or (),
                 model_wire_apis=self._gateway_model_wire_apis,
                 openai_wire_api=self._openai_wire_api,
+                generic_model_entry=generic_model_entry,
             )
             models_path = os.path.join(tmp_dir, "models.json")
             with open(models_path, "w") as f:
@@ -2473,6 +2490,18 @@ class PiExecutor(Executor):
             return state.rpc
 
         wire_catalog = await self._load_gateway_model_wire_apis()
+        generic_model_entry: _JsonObject | None = None
+        if (
+            self._gateway
+            and effective_model
+            and any(
+                not _is_databricks_gateway_base_url(url)
+                for url in (self._base_urls_override or {}).values()
+            )
+        ):
+            generic_model_entry = dict(
+                await run_sync_on_thread(pi_generic_model_json_entry, effective_model)
+            )
 
         if state.rpc is not None:
             await state.rpc.close()
@@ -2480,7 +2509,7 @@ class PiExecutor(Executor):
         tool_server_port = await self._ensure_tool_server(tools)
         tool_server_token = self._tool_server.token if self._tool_server is not None else None
         subprocess_config = self._build_env_and_dir(
-            tools, tool_server_port, tool_server_token, effective_model
+            tools, tool_server_port, tool_server_token, effective_model, generic_model_entry
         )
         env = subprocess_config.env
         tmp_dir = subprocess_config.tmp_dir
