@@ -384,6 +384,13 @@ _PREVIEW_VALUE_CHARS = 60
 _PREVIEW_EXTRA_CHARS = 200
 
 
+def _clip(value: str) -> str:
+    """Bound a preview value, marking the cut so it cannot pass for the whole value."""
+    if len(value) > _PREVIEW_VALUE_CHARS:
+        return value[: _PREVIEW_VALUE_CHARS - 3] + "..."
+    return value
+
+
 def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
     """``key=value`` pairs for every argument but ``skip``, each value bounded.
 
@@ -397,16 +404,15 @@ def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
         value = str(args[key])
         if key == "prompt":
             return f"prompt={len(value)} chars"
-        if len(value) > _PREVIEW_VALUE_CHARS:
-            value = value[: _PREVIEW_VALUE_CHARS - 3] + "..."
-        return f"{key}={value}"
+        return f"{key}={_clip(value)}"
 
     known = [pair(key) for key in _SCHEDULED_TASK_SETTINGS if key in args and key != skip]
     extra = ", ".join(
         pair(key) for key in sorted(args) if key not in _SCHEDULED_TASK_SETTINGS and key != skip
     )
     if len(extra) > _PREVIEW_EXTRA_CHARS:
-        extra = extra[: _PREVIEW_EXTRA_CHARS - 3] + "..."
+        # Cut at a pair boundary so no half key=value fragment is shown.
+        extra = extra[: _PREVIEW_EXTRA_CHARS - 5].rsplit(", ", 1)[0] + ", ..."
     return ", ".join([*known, extra] if extra else known)
 
 
@@ -435,11 +441,11 @@ def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     if not args:
         preview = f"{action} a scheduled task (details unavailable)"
     elif action == "create":
-        name = str(args.get("name") or "(unnamed)")[:_PREVIEW_VALUE_CHARS]
+        name = _clip(str(args.get("name") or "(unnamed)"))
         settings = _scheduled_task_settings(args, skip="name")
         preview = f"create scheduled task {name!r} ({settings or 'no settings'})"
     else:
-        task_id = str(args.get("scheduled_task_id") or "(no id)")[:_PREVIEW_VALUE_CHARS]
+        task_id = _clip(str(args.get("scheduled_task_id") or "(no id)"))
         settings = _scheduled_task_settings(args, skip="scheduled_task_id")
         preview = f"update scheduled task {task_id} ({settings or 'no fields'})"
     return {

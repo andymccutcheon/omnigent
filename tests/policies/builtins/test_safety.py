@@ -656,24 +656,49 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
 
 
 def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
-    """Many long arguments and a missing name still give a short, readable reason."""
+    """Many long extra arguments and a long name still give a short, readable reason."""
     from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
 
+    arguments: dict[str, object] = {f"setting_{i:02d}": "v" * 80 for i in range(20)}
+    arguments["name"] = "N" * 100
     result = ask_on_scheduled_task_change(
         {
             "type": "tool_call",
             "target": "sys_scheduled_task_create",
-            "data": {
-                "name": "sys_scheduled_task_create",
-                "arguments": {f"setting_{i:02d}": "v" * 80 for i in range(20)},
-            },
+            "data": {"name": "sys_scheduled_task_create", "arguments": arguments},
         }
     )
+    reason = result["reason"]
     assert result["result"] == "ASK"
-    assert "'(unnamed)'" in result["reason"]
-    assert result["reason"].count("v" * 58) == 0
-    assert "setting_00=" + "v" * 57 + "..." in result["reason"]
-    assert len(result["reason"]) < 300
+    assert "'" + "N" * 57 + "...'" in reason
+    assert reason.count("v" * 58) == 0
+    assert "setting_00=" + "v" * 57 + "..." in reason
+    # Extras are cut at a pair boundary, never mid key=value.
+    assert ", ...). Approve?" in reason
+    assert "setting_0" not in reason.split(", ...")[0].rsplit(", ", 1)[1][:0]
+    assert len(reason) < 320
+
+
+def test_ask_on_scheduled_task_change_names_missing_identifiers() -> None:
+    """A create without a name or an update without an id still gets a readable preview."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    create = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_create",
+            "data": {"name": "sys_scheduled_task_create", "arguments": {"rrule": "FREQ=HOURLY"}},
+        }
+    )
+    update = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_update",
+            "data": {"name": "sys_scheduled_task_update", "arguments": {"state": "paused"}},
+        }
+    )
+    assert "'(unnamed)' (rrule=FREQ=HOURLY)" in create["reason"]
+    assert "(no id) (state=paused)" in update["reason"]
 
 
 def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
