@@ -1208,12 +1208,15 @@ describe("WorkspacePanel panel picker", () => {
     expect(trigger).not.toHaveFocus();
   });
 
-  it("returns focus to the trigger after a keyboard pick", async () => {
+  it("returns focus to the trigger after a keyboard pick, even after a press in the menu", async () => {
     renderWorkspace({ openFiles: ["src/App.tsx"] });
     const trigger = screen.getByRole("button", { name: "Select panel" });
     trigger.focus();
     fireEvent.keyDown(trigger, { key: "Enter" });
     const item = await screen.findByRole("menuitem", { name: "src/App.tsx" });
+    // A press inside the open menu switches the picker to pointer input; the
+    // Enter that follows must switch it back so focus still returns.
+    fireEvent.pointerDown(item, { button: 0 });
     fireEvent.keyDown(item, { key: "Enter" });
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     await waitFor(() => expect(trigger).toHaveFocus());
