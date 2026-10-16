@@ -3510,7 +3510,6 @@ def test_attached_sandbox_wakes_and_remains_a_reusable_picker_target(built_spa, 
                 "configured_harnesses": {"claude-native": True},
             }
             hosts = [
-                attached,
                 {
                     **attached,
                     "host_id": "host_adhoc",
@@ -3520,6 +3519,33 @@ def test_attached_sandbox_wakes_and_remains_a_reusable_picker_target(built_spa, 
                 },
             ]
             wake_calls = []
+            discovery_calls = []
+            attach_calls = []
+
+            async def discover(route):
+                discovery_calls.append(route.request.method)
+                if len(discovery_calls) == 1:
+                    await route.fulfill(status=502, json={"detail": "controller unavailable"})
+                else:
+                    await route.fulfill(
+                        json={
+                            "sandboxes": []
+                            if len(discovery_calls) == 2
+                            else [
+                                {"sandbox_id": "existing-box", "name": "My devbox"},
+                                {"sandbox_id": "another-box", "name": "Another sandbox"},
+                            ]
+                        }
+                    )
+
+            async def attach(route):
+                attach_calls.append(route.request.post_data_json)
+                if len(attach_calls) == 1:
+                    await route.fulfill(status=403, json={"detail": "Access denied"})
+                else:
+                    attached["status"] = "online"
+                    hosts.append(attached)
+                    await route.fulfill(json={"host_id": attached["host_id"]})
 
             async def wake(route):
                 wake_calls.append(route.request.method)
@@ -3534,6 +3560,8 @@ def test_attached_sandbox_wakes_and_remains_a_reusable_picker_target(built_spa, 
             )
             await page.route("**/v1/info", lambda route: route.fulfill(json=info))
             await page.route("**/v1/hosts", lambda route: route.fulfill(json={"hosts": hosts}))
+            await page.route("**/v1/hosts/sandboxes?provider=static", discover)
+            await page.route("**/v1/hosts/attach", attach)
             await page.route("**/v1/hosts/host_devbox/wake", wake)
             await page.route(
                 re.compile(r"/v1/sessions\?(?!.*pinned=).*visibility=mine"),
@@ -3546,6 +3574,29 @@ def test_attached_sandbox_wakes_and_remains_a_reusable_picker_target(built_spa, 
             try:
                 await page.goto(f"{base_url}/")
                 chip = page.get_by_test_id("new-chat-landing-host-chip")
+                await chip.click()
+                await page.get_by_role("menuitem", name="Choose existing static sandbox").click()
+                discovery = page.get_by_role("dialog", name="Choose existing static sandbox")
+                await expect(discovery.get_by_role("alert")).to_contain_text("Could not load")
+                await discovery.get_by_role("button", name="Refresh").click()
+                await expect(discovery).to_contain_text("No existing static sandboxes")
+                await discovery.get_by_role("button", name="Refresh").click()
+                await expect(
+                    discovery.get_by_role("button", name="Another sandbox")
+                ).to_be_visible()
+                assert not attach_calls
+                await discovery.get_by_role("button", name="My devbox").click()
+                await expect(discovery.get_by_role("alert")).to_have_text("Access denied")
+                await discovery.get_by_role("button", name="My devbox").click()
+                await expect(discovery).to_be_hidden()
+                await expect(chip).to_have_attribute("aria-label", "Host: My devbox, Online")
+                assert (
+                    attach_calls
+                    == [{"provider": "static", "sandbox_id": "existing-box", "name": "My devbox"}]
+                    * 2
+                )
+                attached["status"] = "offline"
+                await page.reload()
                 await chip.click()
                 create_static = page.get_by_role("menuitem", name="New static sandbox", exact=True)
                 await expect(create_static).to_be_visible()
