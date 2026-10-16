@@ -1068,9 +1068,12 @@ function WorkspacePanelImpl({
   // Whether the picker's current interaction came from the pointer or the
   // keyboard; decides whether closing it hands focus back to the trigger.
   const pickerInputRef = useRef<"pointer" | "keyboard">("keyboard");
-  const markPickerInput = (input: "pointer" | "keyboard") => () => {
-    pickerInputRef.current = input;
-  };
+  const markPickerPointer = useCallback(() => {
+    pickerInputRef.current = "pointer";
+  }, []);
+  const markPickerKeyboard = useCallback(() => {
+    pickerInputRef.current = "keyboard";
+  }, []);
   const panelLabels = {
     files: "Files",
     changes: "Changes",
@@ -1438,7 +1441,7 @@ function WorkspacePanelImpl({
           {/* The picker and fullscreen toggle form the trailing control group. */}
           <DropdownMenu
             onOpenChange={(isOpen) => {
-              if (isOpen) pickerInputRef.current = "keyboard";
+              if (isOpen) markPickerKeyboard();
             }}
           >
             <WorkspaceTabTooltip label="Select panel" className="ml-auto pl-1">
@@ -1458,12 +1461,12 @@ function WorkspacePanelImpl({
             <DropdownMenuContent
               align="end"
               className="max-w-[min(32rem,calc(100vw-2rem))]"
-              onPointerDown={markPickerInput("pointer")}
+              onPointerDown={markPickerPointer}
               // A press that began on the trigger selects on release, with no
               // pointerdown inside the menu.
-              onPointerUp={markPickerInput("pointer")}
-              onPointerDownOutside={markPickerInput("pointer")}
-              onKeyDown={markPickerInput("keyboard")}
+              onPointerUp={markPickerPointer}
+              onPointerDownOutside={markPickerPointer}
+              onKeyDown={markPickerKeyboard}
               // Restoring focus after a mouse pick reopens the trigger's tooltip and
               // leaves it hanging; keyboard picks keep Radix's focus restore.
               onCloseAutoFocus={(event) => {

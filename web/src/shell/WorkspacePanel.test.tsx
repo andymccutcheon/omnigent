@@ -1177,6 +1177,9 @@ describe("WorkspacePanel panel picker", () => {
     await settleMenuClose();
     expect(screen.queryByRole("tooltip")).toBeNull();
     expect(trigger).not.toHaveFocus();
+    // Hovering the button afterwards still shows its tooltip.
+    fireEvent.pointerMove(trigger.parentElement!, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Select panel");
   });
 
   it("keeps the tooltip closed when the pick releases a press that began on the trigger", async () => {
