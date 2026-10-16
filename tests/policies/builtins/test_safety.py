@@ -656,11 +656,26 @@ def test_ask_on_scheduled_task_change_keeps_settings_visible_behind_a_long_promp
     assert len(reason) < 800
 
 
-def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
+@pytest.mark.parametrize(
+    "extras,expected",
+    [
+        (
+            {f"setting_{i:02d}": "v" * 80 for i in range(20)},
+            ", ".join(f"setting_{i:02d}=" + "v" * 57 + "..." for i in range(2)) + ", ...",
+        ),
+        ({"x" * 250: "value"}, "..."),
+        ({"x" * 150: "first, " + "v" * 70}, "..."),
+        ({"x" * 190: "a, b"}, "x" * 190 + "=a, b"),
+    ],
+    ids=["many-extras", "long-key", "comma-within-clipped-pair", "complete-comma-value"],
+)
+def test_ask_on_scheduled_task_change_bounds_the_preview(
+    extras: dict[str, object], expected: str
+) -> None:
     """Many long extra arguments and a long name still give a short, readable reason."""
     from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
 
-    arguments: dict[str, object] = {f"setting_{i:02d}": "v" * 80 for i in range(20)}
+    arguments = dict(extras)
     arguments["name"] = "N" * 100
     arguments["timezone"] = "UTC"
     result = ask_on_scheduled_task_change(
@@ -674,14 +689,8 @@ def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
     assert result["result"] == "ASK"
     assert "'" + "N" * 57 + "...'" in reason
     assert reason.count("v" * 58) == 0
-    assert "setting_00=" + "v" * 57 + "..." in reason
-    # Extras are cut at a pair boundary, never mid key=value.
-    assert ", ...). Approve?" in reason
-    extras = reason.split(" (", 1)[1].split(", ...)", 1)[0]
-    assert extras.split(", ") == ["timezone=UTC"] + [
-        f"setting_{i:02d}=" + "v" * 57 + "..." for i in range(2)
-    ]
-    assert len(reason) < 320
+    assert f" (timezone=UTC, {expected}). Approve?" in reason
+    assert len(reason) < 330
 
 
 def test_ask_on_scheduled_task_change_names_missing_identifiers() -> None:

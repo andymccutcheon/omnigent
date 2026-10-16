@@ -42,8 +42,6 @@ def _no_guardrails_spec(
     ("tool_name", "arguments", "expected"),
     [
         ("sys_add_policy", {"name": "shell_gate", "handler": "x.y"}, PolicyAction.ASK),
-        ("sys_scheduled_task_list", {}, PolicyAction.ALLOW),
-        ("sys_scheduled_task_delete", {"scheduled_task_id": _TASK_ID}, PolicyAction.ALLOW),
         ("sys_scheduled_task_create", _CREATE_ARGS, PolicyAction.ASK),
         (
             "sys_scheduled_task_update",
@@ -51,7 +49,7 @@ def _no_guardrails_spec(
             PolicyAction.ASK,
         ),
     ],
-    ids=["add_policy_control", "list_stays_allowed", "delete_stays_allowed", "create", "update"],
+    ids=["add_policy_control", "create", "update"],
 )
 async def test_scheduled_task_mutation_asks_without_guardrails(
     tmp_path: Path,

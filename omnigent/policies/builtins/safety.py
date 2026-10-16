@@ -407,13 +407,19 @@ def _scheduled_task_settings(args: dict[str, object], *, skip: str) -> str:
         return f"{key}={_clip(value)}"
 
     known = [pair(key) for key in _SCHEDULED_TASK_SETTINGS if key in args and key != skip]
-    extra = ", ".join(
-        pair(key) for key in sorted(args) if key not in _SCHEDULED_TASK_SETTINGS and key != skip
-    )
-    if len(extra) > _PREVIEW_EXTRA_CHARS:
-        # Cut at a pair boundary so no half key=value fragment is shown.
-        extra = extra[: _PREVIEW_EXTRA_CHARS - 5].rsplit(", ", 1)[0] + ", ..."
-    return ", ".join([*known, extra] if extra else known)
+    keys = sorted(key for key in args if key not in _SCHEDULED_TASK_SETTINGS and key != skip)
+    extra: list[str] = []
+    remaining = _PREVIEW_EXTRA_CHARS
+    for index, key in enumerate(keys):
+        item = pair(key)
+        size = len(item) + (2 if extra else 0)
+        suffix = 5 if index < len(keys) - 1 else 0
+        if size + suffix > remaining:
+            extra.append("...")
+            break
+        extra.append(item)
+        remaining -= size
+    return ", ".join([*known, *extra])
 
 
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
