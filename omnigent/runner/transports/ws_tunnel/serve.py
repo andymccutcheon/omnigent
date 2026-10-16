@@ -1100,17 +1100,39 @@ async def _serve_tunnel_once(
         async def send_text(data: str) -> None:
             await diagnostics.send(ws.send, data)
 
-        async def receive_frame() -> str | bytes:
+        async def receive_and_handle_frame() -> None:
+            raw = await ws.recv()
+            await _handle_tunnel_frame(
+                app,
+                raw,
+                send_text,
+                dispatch_tasks,
+                ws_channels,
+                on_activity=on_activity,
+                event_dispatcher=event_dispatcher,
+                diagnostics=diagnostics,
+                passive_dispatch_tasks=passive_dispatch_tasks,
+            )
+
+        async def receive_frame() -> None:
+            """Bound the read and inline pong with one elapsed ownership deadline."""
             started = asyncio.get_running_loop().time()
             silence_timeout = RUNNER_TUNNEL_SILENCE_TIMEOUT_S
-            while True:
-                diagnostics.settings["app_silence_timeout_s"] = silence_timeout
-                try:
-                    async with asyncio.timeout_at(started + silence_timeout):
-                        return await ws.recv()
-                except TimeoutError as exc:
+            operation = asyncio.create_task(receive_and_handle_frame())
+            try:
+                while True:
+                    diagnostics.settings["app_silence_timeout_s"] = silence_timeout
+                    done, _pending = await asyncio.wait(
+                        {operation},
+                        timeout=max(
+                            0.0, started + silence_timeout - asyncio.get_running_loop().time()
+                        ),
+                    )
+                    if done:
+                        operation.result()
+                        return
                     # Only event subscriptions are known to detach safely;
-                    # recheck request ownership when the fast deadline expires.
+                    # extend the same operation without cancelling a pending pong.
                     if silence_timeout < _RUNNER_TUNNEL_REQUEST_SILENCE_TIMEOUT_S and (
                         any(
                             not task.done() and task not in passive_dispatch_tasks
@@ -1125,7 +1147,7 @@ async def _serve_tunnel_once(
                         continue
                     if shutdown_event is None or not shutdown_event.is_set():
                         _logger.warning(
-                            "Runner %s received no server frame for %.0fs; reconnecting",
+                            "Runner %s made no server-frame progress for %.0fs; reconnecting",
                             runner_id,
                             silence_timeout,
                             extra=debug_event(
@@ -1141,7 +1163,10 @@ async def _serve_tunnel_once(
                         if transport is not None:
                             with contextlib.suppress(Exception):
                                 transport.abort()
-                    raise ConnectionError("server application ping timeout; reconnecting") from exc
+                    raise ConnectionError("server application ping timeout; reconnecting")
+            finally:
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
 
         if on_connected is not None:
             on_connected()
@@ -1209,7 +1234,7 @@ async def _serve_tunnel_once(
             if shutdown_event is None:
                 while True:
                     try:
-                        raw = await receive_frame()
+                        await receive_frame()
                     except ConnectionClosedOK as exc:
                         if _websocket_close_code(exc) in _TUNNEL_RECYCLE_CLOSE_CODES:
                             # A server recycle (e.g. 1001) must reach
@@ -1218,22 +1243,12 @@ async def _serve_tunnel_once(
                             # clean close.
                             raise
                         break
-                    await _handle_tunnel_frame(
-                        app,
-                        raw,
-                        send_text,
-                        dispatch_tasks,
-                        ws_channels,
-                        on_activity=on_activity,
-                        event_dispatcher=event_dispatcher,
-                        diagnostics=diagnostics,
-                        passive_dispatch_tasks=passive_dispatch_tasks,
-                    )
             else:
                 # Race reads against the shutdown signal. When it fires,
                 # gracefully drain in-flight streams and close the socket so
                 # the server sees a clean end-of-stream, not an abrupt drop.
                 shutdown_wait = asyncio.create_task(shutdown_event.wait())
+                recv_task: asyncio.Task[None] | None = None
                 try:
                     while True:
                         recv_task = asyncio.create_task(receive_frame())
@@ -1279,7 +1294,7 @@ async def _serve_tunnel_once(
                             await ws.close(code=1000, reason=RUNNER_IDLE_SHUTDOWN_CLOSE_REASON)
                             break
                         try:
-                            raw = recv_task.result()
+                            recv_task.result()
                         except ConnectionClosedOK as exc:
                             # Normal close (1000/1005) mirrors the plain
                             # ``ws.recv()`` loop above: ends silently unless
@@ -1288,18 +1303,10 @@ async def _serve_tunnel_once(
                             if _websocket_close_code(exc) in _TUNNEL_RECYCLE_CLOSE_CODES:
                                 raise
                             break
-                        await _handle_tunnel_frame(
-                            app,
-                            raw,
-                            send_text,
-                            dispatch_tasks,
-                            ws_channels,
-                            on_activity=on_activity,
-                            event_dispatcher=event_dispatcher,
-                            diagnostics=diagnostics,
-                            passive_dispatch_tasks=passive_dispatch_tasks,
-                        )
                 finally:
+                    if recv_task is not None:
+                        recv_task.cancel()
+                        await asyncio.gather(recv_task, return_exceptions=True)
                     shutdown_wait.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await shutdown_wait

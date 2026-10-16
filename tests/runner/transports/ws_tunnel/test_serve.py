@@ -1247,13 +1247,16 @@ async def test_runner_close_freezes_pending_response_send(
     assert asyncio.all_tasks() == tasks_before
 
 
-@pytest.mark.parametrize("graceful_shutdown", [False, True])
+@pytest.mark.parametrize(
+    ("graceful_shutdown", "idle_stop"), [(False, False), (True, False), (True, True)]
+)
 async def test_runner_cancelled_pong_send_keeps_heartbeat_and_send_timings(
-    monkeypatch: pytest.MonkeyPatch, graceful_shutdown: bool
+    monkeypatch: pytest.MonkeyPatch, graceful_shutdown: bool, idle_stop: bool
 ) -> None:
     import websockets
 
     pong_started = asyncio.Event()
+    close_frames: list[tuple[int, str]] = []
 
     class BlockedPongWS(_CleanCloseWS):
         async def send(self, data: str) -> None:
@@ -1264,6 +1267,9 @@ async def test_runner_cancelled_pong_send_keeps_heartbeat_and_send_timings(
         async def recv(self) -> str:
             return encode_frame(PingFrame(ts=123))
 
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            close_frames.append((code, reason))
+
     @contextlib.asynccontextmanager
     async def connect(_url, **_kwargs):
         yield BlockedPongWS()
@@ -1272,6 +1278,7 @@ async def test_runner_cancelled_pong_send_keeps_heartbeat_and_send_timings(
     now = 100.0
     diagnostics = TunnelDiagnostics(clock=lambda: now)
     tasks_before = asyncio.all_tasks()
+    shutdown_event = asyncio.Event() if graceful_shutdown else None
     task = asyncio.create_task(
         _serve_tunnel_once(
             _noop_app,
@@ -1280,16 +1287,21 @@ async def test_runner_cancelled_pong_send_keeps_heartbeat_and_send_timings(
             runner_id="runner-diag",
             runner_version="0.1.0",
             diagnostics=diagnostics,
-            shutdown_event=asyncio.Event() if graceful_shutdown else None,
+            shutdown_event=shutdown_event,
         )
     )
     try:
         await asyncio.wait_for(pong_started.wait(), timeout=2)
         now += 6
     finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        if idle_stop:
+            assert shutdown_event is not None
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=2)
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
     snapshot = diagnostics.snapshot()
     assert snapshot["last_app_ping_received_age_s"] == 6.0
     assert snapshot["last_app_pong_sent_age_s"] is None
@@ -1297,6 +1309,7 @@ async def test_runner_cancelled_pong_send_keeps_heartbeat_and_send_timings(
     assert snapshot["last_send_outcome"] == "cancelled"
     assert snapshot["send_duration_max_s"] == 6.0
     assert asyncio.all_tasks() == tasks_before
+    assert close_frames == ([(1000, RUNNER_IDLE_SHUTDOWN_CLOSE_REASON)] if idle_stop else [])
 
 
 @pytest.mark.asyncio
@@ -3422,6 +3435,7 @@ async def test_serve_tunnel_keeps_escalating_after_brief_connection(
 
 @pytest.mark.parametrize("graceful_shutdown", [False, True])
 @pytest.mark.parametrize("late_request", [False, True])
+@pytest.mark.parametrize("blocked_pong", [False, True])
 @pytest.mark.parametrize(
     ("method", "path", "protected", "finishes", "quick_request"),
     [
@@ -3438,6 +3452,7 @@ async def test_application_silence_preserves_connection_owned_requests(
     monkeypatch: pytest.MonkeyPatch,
     graceful_shutdown: bool,
     late_request: bool,
+    blocked_pong: bool,
     method: str,
     path: str,
     protected: bool,
@@ -3446,6 +3461,7 @@ async def test_application_silence_preserves_connection_owned_requests(
 ) -> None:
     """A silent peer cannot cancel request-owned work at the subscription deadline."""
     import websockets
+    from websockets.asyncio.client import ClientConnection
 
     monkeypatch.setattr(serve_module, "RUNNER_TUNNEL_SILENCE_TIMEOUT_S", 0.15)
     monkeypatch.setattr(serve_module, "_RUNNER_TUNNEL_REQUEST_SILENCE_TIMEOUT_S", 1.0)
@@ -3453,6 +3469,24 @@ async def test_application_silence_preserves_connection_owned_requests(
     cancelled = asyncio.Event()
     finish = asyncio.Event()
     checked = asyncio.Event()
+    pong_started = asyncio.Event()
+    pong_cancelled = asyncio.Event()
+    release_pong = asyncio.Event()
+    original_send = ClientConnection.send
+
+    async def send_with_backpressure(self, data, *args, **kwargs):
+        if isinstance(data, str) and json.loads(data).get("kind") == "pong":
+            if not pong_started.is_set():
+                pong_started.set()
+                try:
+                    await release_pong.wait()
+                except asyncio.CancelledError:
+                    pong_cancelled.set()
+                    raise
+        return await original_send(self, data, *args, **kwargs)
+
+    if blocked_pong:
+        monkeypatch.setattr(ClientConnection, "send", send_with_backpressure)
 
     async def app(scope, receive, send):
         if scope["type"] == "websocket":
@@ -3481,6 +3515,10 @@ async def test_application_silence_preserves_connection_owned_requests(
         )
         await ws.send(encode_frame(frame))
         await asyncio.wait_for(started.wait(), timeout=2)
+        if blocked_pong:
+            await ws.send(encode_frame(PingFrame(ts=122)))
+            await asyncio.wait_for(pong_started.wait(), timeout=2)
+            await asyncio.wait_for(await ws.ping(), timeout=2)
         if quick_request:
             finish.set()
             while json.loads(await ws.recv())["kind"] not in {"response.end", "ws.close"}:
@@ -3491,7 +3529,9 @@ async def test_application_silence_preserves_connection_owned_requests(
         await asyncio.sleep(0.3)
         if protected:
             assert not cancelled.is_set()
+            assert not pong_cancelled.is_set()
         if finishes:
+            release_pong.set()
             await ws.send(encode_frame(PingFrame(ts=123)))
             finish.set()
             while json.loads(await ws.recv())["kind"] not in {"response.end", "ws.close"}:
@@ -3520,6 +3560,8 @@ async def test_application_silence_preserves_connection_owned_requests(
             else:
                 with pytest.raises(ConnectionError, match="application ping timeout"):
                     await task
+            if blocked_pong:
+                assert pong_cancelled.is_set() == (not finishes)
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, ConnectionError):
