@@ -591,7 +591,8 @@ def test_ask_on_add_policy_handles_missing_arguments() -> None:
 # ── ask_on_scheduled_task_change ───────────────────────────────
 
 
-def test_ask_on_scheduled_task_change_asks_for_create_with_preview() -> None:
+@pytest.mark.parametrize("data_name", ["sys_scheduled_task_create", "transformed_tool"])
+def test_ask_on_scheduled_task_change_asks_for_create_with_preview(data_name: str) -> None:
     """A create call ASKs and names the task and its schedule."""
     from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
 
@@ -600,7 +601,7 @@ def test_ask_on_scheduled_task_change_asks_for_create_with_preview() -> None:
             "type": "tool_call",
             "target": "sys_scheduled_task_create",
             "data": {
-                "name": "sys_scheduled_task_create",
+                "name": data_name,
                 "arguments": {"name": "nightly triage", "rrule": "FREQ=DAILY;BYHOUR=9"},
             },
         }
@@ -661,6 +662,7 @@ def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
 
     arguments: dict[str, object] = {f"setting_{i:02d}": "v" * 80 for i in range(20)}
     arguments["name"] = "N" * 100
+    arguments["timezone"] = "UTC"
     result = ask_on_scheduled_task_change(
         {
             "type": "tool_call",
@@ -676,7 +678,9 @@ def test_ask_on_scheduled_task_change_bounds_the_preview() -> None:
     # Extras are cut at a pair boundary, never mid key=value.
     assert ", ...). Approve?" in reason
     extras = reason.split(" (", 1)[1].split(", ...)", 1)[0]
-    assert extras.split(", ") == [f"setting_{i:02d}=" + "v" * 57 + "..." for i in range(2)]
+    assert extras.split(", ") == ["timezone=UTC"] + [
+        f"setting_{i:02d}=" + "v" * 57 + "..." for i in range(2)
+    ]
     assert len(reason) < 320
 
 

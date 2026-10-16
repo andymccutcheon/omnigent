@@ -221,6 +221,11 @@ def test_agent_scheduled_task_create_requires_approval(
     page.goto(f"{base_url}/c/{session_id}")
 
     def no_task_yet() -> None:
+        card = page.locator(_APPROVAL_CARD).first
+        expect(card).to_contain_text("create scheduled task")
+        expect(card).to_contain_text(task_name)
+        expect(card).to_contain_text(f"rrule={_RRULE}")
+        expect(card).to_contain_text("timezone=UTC")
         assert not _tasks_named(base_url, task_name), "task was created before approval"
 
     outcome = _drive_gated_turn(
