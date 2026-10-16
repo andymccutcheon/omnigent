@@ -1,4 +1,4 @@
-"""E2E: Cmd/Ctrl+Alt+Shift+N opens a new session from focused chat input."""
+"""E2E: Cmd/Ctrl+Shift+O opens a new session from focused chat input."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def test_new_session_hotkey_from_focused_composer(
     expect(composer).to_be_focused()
 
     modifier = "Meta" if sys.platform == "darwin" else "Control"
-    page.keyboard.press(f"{modifier}+Alt+Shift+KeyN")
+    page.keyboard.press(f"{modifier}+Shift+o")
 
     expect(page).to_have_url(f"{base_url}/", timeout=10_000)
     new_session_composer = page.get_by_placeholder("Describe a task to start a new session…")

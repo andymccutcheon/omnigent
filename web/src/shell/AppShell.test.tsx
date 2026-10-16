@@ -5392,13 +5392,7 @@ describe("new-session browser shortcut", () => {
     composer.focus();
     fireEvent.keyDown(composer, { code: "KeyN", ctrlKey: true, altKey: true });
     expect(screen.queryByText("New session route")).toBeNull();
-    fireEvent.keyDown(composer, {
-      key: "N",
-      code: "KeyN",
-      ctrlKey: true,
-      altKey: true,
-      shiftKey: true,
-    });
+    fireEvent.keyDown(composer, { key: "O", code: "KeyO", ctrlKey: true, shiftKey: true });
     expect(screen.getByText("New session route")).toBeInTheDocument();
     setEmbedRoot(null);
   });
