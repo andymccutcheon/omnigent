@@ -3408,17 +3408,15 @@ def _seed_pi_own_login(agent_dir: Path) -> None:
 def test_model_options_fall_back_to_pi_own_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no managed provider, the picker offers every model Pi's own login drives.
+    """With no managed provider, the picker offers Pi's own logged-in models.
 
     The launched Pi runs on its own login in that state, so the pre-launch
-    catalog is Pi's ``models-store.json`` filtered to logged-in providers plus
-    the custom providers declared in ``models.json``, qualified
-    ``provider/model`` (the form Pi's ``--model`` resolves).
+    catalog is Pi's ``models-store.json`` filtered to logged-in providers,
+    qualified ``provider/model`` (the form Pi's ``--model`` resolves).
     """
     monkeypatch.setattr(creds, "resolve_pi_native_provider", lambda: None)
     monkeypatch.setenv(creds.PI_CODING_AGENT_DIR_ENV_VAR, str(tmp_path))
     _seed_pi_own_login(tmp_path)
-    _seed_pi_custom_providers(tmp_path)
 
     assert creds.pi_native_model_options() == [
         {
@@ -3431,7 +3429,6 @@ def test_model_options_fall_back_to_pi_own_login(
             "model": "anthropic/claude-sonnet-4-5",
             "displayName": "Claude Sonnet 4.5",
         },
-        *_PI_CUSTOM_OPTIONS,
     ]
 
 
@@ -3531,6 +3528,21 @@ def test_pi_own_login_options_tolerate_malformed_files(tmp_path: Path) -> None:
     (tmp_path / "models-store.json").write_text("[]")
     (tmp_path / "models.json").write_text(json.dumps({"providers": ["ollama"]}))
     assert creds.pi_own_login_model_options(agent_dir=tmp_path) == []
+
+
+def test_pi_own_login_options_keep_cached_catalog_when_models_json_is_malformed(
+    tmp_path: Path,
+) -> None:
+    """A broken ``models.json`` drops only its own rows; the logged-in catalog survives."""
+    _seed_pi_own_login(tmp_path)
+    (tmp_path / "models.json").write_text("{not json")
+
+    options = creds.pi_own_login_model_options(agent_dir=tmp_path)
+
+    assert [option["id"] for option in options] == [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-5",
+    ]
 
 
 def test_pi_own_login_model_arg_strips_managed_prefix_only() -> None:

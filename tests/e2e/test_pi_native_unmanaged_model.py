@@ -447,9 +447,9 @@ def test_facet1_prelaunch_model_options_offer_the_hosts_pi_models(
 
     A host with a logged-in Pi (one model in ``models-store.json``, one
     custom provider in ``models.json``) but no omnigent-managed provider
-    must still surface both models to the pre-launch picker. The buggy
-    build returns ``{"models": []}`` (only "Default" in the UI); the fix
-    enumerates every model Pi's own configuration can drive.
+    must still surface both models to the pre-launch picker: the endpoint
+    returns the logged-in provider's cached models and the configured
+    custom-provider models, never an empty ``{"models": []}``.
 
     :param unmanaged_pi_host: The spawned unmanaged-Pi host.
     :param http_client: HTTP client pointed at the server.
