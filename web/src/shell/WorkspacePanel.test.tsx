@@ -1159,12 +1159,12 @@ describe("WorkspacePanel panel picker", () => {
     return trigger;
   }
 
-  // Radix hands focus back from a setTimeout(0) queued when the menu unmounts;
-  // a timer queued after it runs after it, so this flush is ordered.
+  // Radix hands focus back from a timer queued when the menu unmounts; give it
+  // a short, bounded window before asserting that nothing refocused.
   async function settleMenuClose() {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
+      setTimeout(resolve, 50);
     });
   }
 
