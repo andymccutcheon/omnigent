@@ -1481,32 +1481,47 @@ def _install_shutdown_fake_ws(monkeypatch: pytest.MonkeyPatch) -> _ShutdownFakeW
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("same_tick_request", [False, True])
 async def test_serve_tunnel_once_graceful_shutdown_returns_and_closes(
     monkeypatch: pytest.MonkeyPatch,
+    same_tick_request: bool,
 ) -> None:
-    """Setting the shutdown event ends the read loop and closes the socket.
-
-    Drives the real ``_serve_tunnel_once`` with a fake WS whose ``recv`` blocks
-    forever. When the shutdown event fires, the loop must cancel the pending
-    recv, run the drain hook, return cleanly, and close the connection with the
-    idle-shutdown reason the server uses to settle the runner's sessions.
-    """
+    """Shutdown cancels a pending read or drops a simultaneous work frame."""
     shutdown_event = asyncio.Event()
     drain_calls: list[str] = []
+    admitted: list[bool] = []
+    dispatched: list[str] = []
     ws = _install_shutdown_fake_ws(monkeypatch)
+    tasks_before = asyncio.all_tasks()
 
-    # Pre-arm the shutdown so the very first recv() race resolves to shutdown
-    # (recv blocks forever). Deterministic — no real-time sleep to lose to load.
-    shutdown_event.set()
+    async def receive_final_request() -> str:
+        shutdown_event.set()
+        return encode_frame(
+            RequestFrame(
+                id="shutdown-race", method="POST", path="/v1/sessions/conv/events", headers={}
+            )
+        )
+
+    async def app(scope, receive, send):
+        dispatched.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    if same_tick_request:
+        monkeypatch.setattr(ws, "recv", receive_final_request)
+    else:
+        shutdown_event.set()
+
     await asyncio.wait_for(
         _serve_tunnel_once(
-            _noop_app,
+            app,
             tunnel_url="wss://acme.databricks.com/v1/runners/r/tunnel",
             server_url="https://acme.databricks.com",
             runner_id="r",
             runner_version="0.1.0",
             auth_token="tok",
             shutdown_event=shutdown_event,
+            on_activity=lambda: admitted.append(True),
             on_graceful_shutdown=lambda: drain_calls.append("drained"),
         ),
         timeout=5.0,
@@ -1515,6 +1530,9 @@ async def test_serve_tunnel_once_graceful_shutdown_returns_and_closes(
     assert drain_calls == ["drained"]
     assert ws.close_frames == [(1000, RUNNER_IDLE_SHUTDOWN_CLOSE_REASON)]
     assert ws.closed is True
+    assert admitted == []
+    assert dispatched == []
+    assert asyncio.all_tasks() == tasks_before
 
 
 @pytest.mark.asyncio

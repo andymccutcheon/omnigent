@@ -1102,6 +1102,8 @@ async def _serve_tunnel_once(
 
         async def receive_and_handle_frame() -> None:
             raw = await ws.recv()
+            if shutdown_event is not None and shutdown_event.is_set():
+                return
             await _handle_tunnel_frame(
                 app,
                 raw,
