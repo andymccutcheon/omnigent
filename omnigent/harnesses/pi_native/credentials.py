@@ -1796,8 +1796,11 @@ def resolve_pi_native_provider(
     try:
         # Preserve Pi-login references unless they name a configured provider.
         if bare and not names_configured_provider and pi_own_login_serves_reference(model):
-            _LOGGER.info(
-                "pi-native: model %r is served by Pi's own %r login; Pi will use its own login.",
+            # Warn: the same id could also be served by the configured default
+            # provider, so this routes credentials/billing by host login state.
+            _LOGGER.warning(
+                "pi-native: model %r is served by Pi's own %r login; Pi will use that "
+                "login instead of the omnigent-configured default provider.",
                 model,
                 prefix,
             )

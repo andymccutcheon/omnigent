@@ -26,6 +26,7 @@ from omnigent.runner.native.orchestration import (
     _pi_native_model_from_spec,
 )
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from tests._helpers.pi_native import seed_pi_own_login_catalog
 
 
 def _spec(model: str | None) -> AgentSpec:
@@ -406,28 +407,14 @@ async def test_auto_create_pi_terminal_bakes_tunnel_token_into_config(
     assert config["authHeaders"][RUNNER_TUNNEL_TOKEN_HEADER] == "tok-abc"
 
 
-def _seed_pi_own_login_catalog(agent_dir: Path) -> None:
-    """Give Pi's own agent dir an ``openai-codex`` login serving ``gpt-5.6-sol``."""
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "auth.json").write_text(json.dumps({"openai-codex": {"type": "oauth"}}))
-    (agent_dir / "models-store.json").write_text(
-        json.dumps({"openai-codex": {"models": [{"id": "gpt-5.6-sol"}]}})
-    )
-
-
 @pytest.mark.asyncio
 async def test_auto_create_pi_terminal_cold_resume_keeps_persisted_pi_login_pick(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cold-resume relaunch keeps a persisted Pi own-login pick on Pi's login.
-
-    With an OpenRouter provider defaulted to ``pi``, a session snapshot carrying
-    ``model_override="openai-codex/gpt-5.6-sol"`` (picked from Pi's own
-    ``openai-codex`` login) must relaunch Pi as ``--model
-    openai-codex/gpt-5.6-sol`` without a managed config dir, not rewrite the pick
-    onto the ``omnigent`` gateway as ``omnigent/openai-codex/gpt-5.6-sol``.
-    """
+    """Cold resume keeps a persisted Pi own-login pick on Pi's login: with an
+    OpenRouter ``default: pi`` provider, ``--model openai-codex/gpt-5.6-sol`` passes
+    through with no managed config dir instead of ``omnigent/...`` on the gateway."""
     import omnigent.harnesses.pi_native.bridge as pi_bridge
     import omnigent.harnesses.pi_native.credentials as creds
 
@@ -450,7 +437,7 @@ async def test_auto_create_pi_terminal_cold_resume_keeps_persisted_pi_login_pick
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     own_login_dir = tmp_path / "pi-own-login"
-    _seed_pi_own_login_catalog(own_login_dir)
+    seed_pi_own_login_catalog(own_login_dir, "openai-codex", ["gpt-5.6-sol"])
     monkeypatch.setenv(creds.PI_CODING_AGENT_DIR_ENV_VAR, str(own_login_dir))
     monkeypatch.setattr(pi_bridge, "_BRIDGE_ROOT", tmp_path / "pi-native")
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
@@ -527,6 +514,7 @@ async def test_auto_create_pi_terminal_cold_resume_keeps_persisted_pi_login_pick
 
     args = launched["args"]
     assert "--provider" not in args, args
+    assert "--model" in args, args
     assert args[args.index("--model") + 1] == "openai-codex/gpt-5.6-sol", args
     # No managed config dir means Pi's ``/model`` picker keeps Pi's own catalog
     # rather than collapsing to a lone gateway entry.
