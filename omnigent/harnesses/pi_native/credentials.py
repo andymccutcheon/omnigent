@@ -453,7 +453,8 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
     providers with an ``auth.json`` entry, plus the models declared in Pi's
     ``models.json`` for the providers Pi activates there — logged-in ones and
     custom endpoints carrying their own ``apiKey``, which never appear in
-    ``auth.json`` or ``models-store.json``.
+    ``auth.json`` or ``models-store.json``. Providers reusing Omnigent's managed
+    ids are skipped: the own-login launch path reads those prefixes as managed.
 
     :param agent_dir: Pi agent dir override (tests); defaults to the host's
         own Pi agent dir.
@@ -472,10 +473,15 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
     for provider_id, payload in declared.items() if _is_str_object_dict(declared) else ():
         api_key = payload.get("apiKey") if _is_str_object_dict(payload) else None
         if provider_id in logged_in or (isinstance(api_key, str) and api_key):
+            # Appended after the models-store rows so declared models.json names win.
             catalogs.append((provider_id, payload))
     options: dict[str, dict[str, object]] = {}
     for provider_id, payload in catalogs:
         if not _is_str_object_dict(payload):
+            continue
+        if provider_id in _PI_MANAGED_PROVIDER_IDS:
+            # pi_own_login_model_arg() strips these ids as a stale managed pick,
+            # so the launch could not address such a row.
             continue
         models = payload.get("models")
         for model in models if isinstance(models, list) else []:

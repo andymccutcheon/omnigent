@@ -3436,6 +3436,7 @@ def test_pi_own_login_options_skip_custom_providers_without_a_credential(
     tmp_path: Path,
 ) -> None:
     """A models.json provider with neither a stored login nor its own apiKey is left out."""
+    _seed_pi_own_login(tmp_path)
     (tmp_path / "models.json").write_text(
         json.dumps(
             {
@@ -3450,7 +3451,42 @@ def test_pi_own_login_options_skip_custom_providers_without_a_credential(
             }
         )
     )
-    assert creds.pi_own_login_model_options(agent_dir=tmp_path) == _PI_CUSTOM_OPTIONS
+
+    options = creds.pi_own_login_model_options(agent_dir=tmp_path)
+
+    assert [option["id"] for option in options] == [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-5",
+        "ollama/llama3.1:8b",
+        "ollama/qwen2.5-coder:7b",
+    ]
+
+
+def test_pi_own_login_options_skip_providers_reusing_managed_ids(tmp_path: Path) -> None:
+    """A models.json provider named like a managed id is left out: its picks could not launch.
+
+    ``pi_own_login_model_arg()`` reads ``omnigent/...`` as a stale managed pick
+    and strips the prefix, so the picker must not offer rows it cannot address.
+    """
+    (tmp_path / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    creds._PI_PROVIDER_ID: {
+                        "baseUrl": "http://127.0.0.1:9000/v1",
+                        "api": "openai-completions",
+                        "apiKey": "shadow",
+                        "models": [{"id": "organization/custom-model"}],
+                    }
+                }
+            }
+        )
+    )
+
+    assert creds.pi_own_login_model_options(agent_dir=tmp_path) == []
+    assert (
+        creds.pi_own_login_model_arg(f"{creds._PI_PROVIDER_ID}/organization/custom-model") is None
+    )
 
 
 def test_pi_own_login_options_merge_declared_models_of_a_logged_in_provider(
