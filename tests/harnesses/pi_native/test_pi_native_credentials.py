@@ -3463,16 +3463,23 @@ def test_pi_own_login_options_skip_custom_providers_without_a_credential(
 
 
 def test_pi_own_login_options_skip_providers_reusing_managed_ids(tmp_path: Path) -> None:
-    """A models.json provider named like a managed id is left out: its picks could not launch.
+    """Providers named like a managed id are left out of both catalogs.
 
     ``pi_own_login_model_arg()`` reads ``omnigent/...`` as a stale managed pick
-    and strips the prefix, so the picker must not offer rows it cannot address.
+    and strips the prefix, so the picker must not offer rows it cannot address,
+    whether they come from a cached login or from ``models.json``.
     """
+    (tmp_path / "auth.json").write_text(
+        json.dumps({creds._PI_PROVIDER_ID: {"type": "api_key", "key": "sk-shadow"}})
+    )
+    (tmp_path / "models-store.json").write_text(
+        json.dumps({creds._PI_PROVIDER_ID: {"models": [{"id": "cached-model"}]}})
+    )
     (tmp_path / "models.json").write_text(
         json.dumps(
             {
                 "providers": {
-                    creds._PI_PROVIDER_ID: {
+                    creds._PI_OPENAI_PROVIDER_ID: {
                         "baseUrl": "http://127.0.0.1:9000/v1",
                         "api": "openai-completions",
                         "apiKey": "shadow",
@@ -3484,8 +3491,10 @@ def test_pi_own_login_options_skip_providers_reusing_managed_ids(tmp_path: Path)
     )
 
     assert creds.pi_own_login_model_options(agent_dir=tmp_path) == []
+    assert creds.pi_own_login_model_arg(f"{creds._PI_PROVIDER_ID}/cached-model") == "cached-model"
     assert (
-        creds.pi_own_login_model_arg(f"{creds._PI_PROVIDER_ID}/organization/custom-model") is None
+        creds.pi_own_login_model_arg(f"{creds._PI_OPENAI_PROVIDER_ID}/organization/custom-model")
+        is None
     )
 
 
@@ -3559,19 +3568,23 @@ def test_pi_own_login_options_list_models_json_providers_without_login(tmp_path:
 
 
 def test_pi_own_login_options_tolerate_malformed_files(tmp_path: Path) -> None:
-    """Malformed auth/models-store/models files degrade to an empty catalog, never raise."""
+    """Malformed auth/models-store files degrade to an empty catalog, never raise."""
     (tmp_path / "auth.json").write_text("{not json")
     (tmp_path / "models-store.json").write_text("[]")
-    (tmp_path / "models.json").write_text(json.dumps({"providers": ["ollama"]}))
     assert creds.pi_own_login_model_options(agent_dir=tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    "models_json",
+    ["{not json", json.dumps({"providers": ["ollama"]})],
+    ids=["invalid-json", "providers-not-an-object"],
+)
 def test_pi_own_login_options_keep_cached_catalog_when_models_json_is_malformed(
-    tmp_path: Path,
+    tmp_path: Path, models_json: str
 ) -> None:
     """A broken ``models.json`` drops only its own rows; the logged-in catalog survives."""
     _seed_pi_own_login(tmp_path)
-    (tmp_path / "models.json").write_text("{not json")
+    (tmp_path / "models.json").write_text(models_json)
 
     options = creds.pi_own_login_model_options(agent_dir=tmp_path)
 
