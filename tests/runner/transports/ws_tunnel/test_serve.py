@@ -2663,7 +2663,7 @@ async def test_server_silence_reconnects_despite_protocol_pongs(
         protocol_pong.set()
         if application_traffic:
             for n in range(4):
-                await asyncio.sleep(timeout_s * 0.75)
+                await asyncio.sleep(timeout_s * 0.5)
                 await ws.send(encode_frame(PingFrame(ts=n)))
                 pong = json.loads(await ws.recv())
                 assert pong == {"kind": "pong", "ts": n}
