@@ -2161,24 +2161,36 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._session("list_host_conversations") as session:
             return list(session.scalars(query.order_by(SqlConversationMetadata.id).limit(limit)))
 
-    def list_pending_inputs(self, conversation_id: str) -> list[ConversationItem]:
-        # append enforces this cap under the conversation lock. The response-id
-        # index bounds the entire read; sorting this small set preserves send order.
+    def list_pending_inputs_page(
+        self,
+        conversation_id: str,
+        *,
+        after: int | None = None,
+        limit: int = MAX_PENDING_INPUTS,
+    ) -> tuple[list[ConversationItem], int | None]:
+        # The cursor is the last returned position. The response-id index bounds
+        # the read to the conversation's pending rows (append caps them at
+        # MAX_PENDING_INPUTS), so ordering them by position stays small.
+        query = select(SqlConversationItem).where(
+            SqlConversationItem.workspace_id == current_workspace_id(),
+            SqlConversationItem.conversation_id == conversation_id,
+            SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+        )
+        if after is not None:
+            query = query.where(SqlConversationItem.position > after)
         with self._conv_session("list_pending_inputs") as session:
             rows = list(
                 session.scalars(
-                    select(SqlConversationItem)
-                    .where(
-                        SqlConversationItem.workspace_id == current_workspace_id(),
-                        SqlConversationItem.conversation_id == conversation_id,
-                        SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+                    query.order_by(SqlConversationItem.position, SqlConversationItem.id).limit(
+                        limit + 1
                     )
-                    .limit(MAX_PENDING_INPUTS)
                 )
             )
-            rows.sort(key=lambda row: row.position)
-            decoded = self._decode_item_data_batch([row.data for row in rows])
-            return [_to_item(row, data) for row, data in zip(rows, decoded, strict=True)]
+        more = len(rows) > limit
+        rows = rows[:limit]
+        decoded = self._decode_item_data_batch([row.data for row in rows])
+        items = [_to_item(row, data) for row, data in zip(rows, decoded, strict=True)]
+        return items, rows[-1].position if more else None
 
     def transition_pending_input(
         self,

@@ -890,8 +890,7 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
             },
         },
     )
-    # Saved while provision is held, for the launch to deliver. Pre-fix
-    # this returned 503 "No runner bound for session".
+    # Saved while provisioning is held, for delivery after launch.
     assert message_resp.status_code == 202, message_resp.text
     assert message_resp.json()["queued"] is True
 

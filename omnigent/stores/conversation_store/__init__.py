@@ -419,9 +419,31 @@ class ConversationStore(ABC):
     updates, and deletion.
     """
 
-    def list_pending_inputs(self, conversation_id: str) -> list[ConversationItem]:  # noqa: ARG002
-        """Return the bounded startup inputs in submission order."""
-        return []
+    def list_pending_inputs_page(
+        self,
+        conversation_id: str,  # noqa: ARG002
+        *,
+        after: int | None = None,  # noqa: ARG002
+        limit: int = MAX_PENDING_INPUTS,  # noqa: ARG002
+    ) -> tuple[list[ConversationItem], int | None]:
+        """
+        Page the conversation's startup inputs in submission order.
+
+        :param after: The cursor a previous page returned, or ``None`` to start.
+        :param limit: Most inputs to return.
+        :returns: The inputs and the cursor for the next page, ``None`` at the end.
+        """
+        return [], None
+
+    def list_pending_inputs(self, conversation_id: str) -> list[ConversationItem]:
+        """Return all startup inputs (at most ``MAX_PENDING_INPUTS``) in submission order."""
+        items: list[ConversationItem] = []
+        after: int | None = None
+        while True:
+            page, after = self.list_pending_inputs_page(conversation_id, after=after)
+            items.extend(page)
+            if after is None:
+                return items
 
     def transition_pending_input(
         self,

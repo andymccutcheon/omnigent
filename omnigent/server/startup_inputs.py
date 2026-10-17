@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import weakref
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
@@ -108,12 +109,25 @@ StartupDispatch = Callable[
 ]
 
 
+_services: weakref.WeakSet[ManagedStartupInputs] = weakref.WeakSet()
+
+
+def wake_startup_worker(host_id: str) -> None:
+    """Prompt a running host worker to look for the next saved input now."""
+    key = (current_workspace_id(), host_id)
+    for service in _services:
+        entry = service._workers.get(key)
+        if entry is not None:
+            entry[2].set()
+
+
 class ManagedStartupInputs:
     """Recover pending conversation items on the replica connected to their host."""
 
     def __init__(self, conversations: ConversationStore, hosts: HostRegistry) -> None:
         self.conversations = conversations
         self.hosts = hosts
+        _services.add(self)
         self.dispatch: StartupDispatch | None = None
         self._workers: dict[
             tuple[int, str], tuple[HostConnection, asyncio.Task[None], asyncio.Event]
@@ -318,17 +332,20 @@ class ManagedStartupInputs:
             if not items:
                 await self._finish(session_id)
             return False
-        if items:
+        # A refused input waits for an explicit retry without holding back the
+        # ones behind it. One submitted to a native harness and awaiting its
+        # transcript receipt still does: it may already have run.
+        head = next((item for item in items if item.status != "failed"), None)
+        if head is not None:
             # Delivered even without the label: a message saved while the label
             # was being cleared still belongs to this session's startup.
-            first = items[0]
             key = (current_workspace_id(), session_id)
-            if first.status == "in_progress" and key not in self._deliveries:
+            if head.status == "in_progress" and key not in self._deliveries:
                 task = asyncio.create_task(
-                    self._deliver(app, session_id, first), name=f"startup-input-{session_id}"
+                    self._deliver(app, session_id, head), name=f"startup-input-{session_id}"
                 )
                 self._deliveries[key] = task
-            return first.status == "in_progress"
+            return head.status == "in_progress"
         if state == "pending" and conv.runner_id is None:
             # The launch bound this host on a replica without its tunnel, so it
             # could not start the runner; start it here.
@@ -345,7 +362,7 @@ class ManagedStartupInputs:
                     f"The agent could not start on the sandbox: {reason[:1000]}",
                 )
             return True
-        if state is not None:
+        if state is not None and not items:
             # A runner is bound and nothing is left to deliver.
             await self._finish(session_id)
         return False

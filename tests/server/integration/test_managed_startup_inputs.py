@@ -31,6 +31,7 @@ from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     ManagedStartupInputs,
     StartupInputContext,
+    wake_startup_worker,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
@@ -863,3 +864,111 @@ async def test_crashed_create_launch_is_recorded_on_the_session(
     assert conv is not None and conv.labels.get(STARTUP_LABEL) == "failed"
     [error] = env.conv_store.list_items(session_id).data
     assert isinstance(error.data, ErrorData) and "store unavailable" in error.data.message
+
+
+async def test_refused_input_does_not_hold_back_the_next_one(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Policy denies A; B behind it is still delivered, and retrying A doesn't replay B."""
+    env = startup_env
+    session_id = await _create(env)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    env.conv_store.set_runner_id(session_id, uuid4().hex)
+    connection = _connect_host(env, host_id)
+    startup = env.app.state.startup_inputs
+    first = env.conv_store.list_pending_inputs(session_id)[0]
+    follow_up = {
+        "type": "message",
+        "data": {"role": "user", "content": [{"type": "input_text", "text": "Second input"}]},
+    }
+    second = await startup.enqueue(
+        session_id,
+        SessionEventInput.model_validate(follow_up),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    denied_texts = {_TEXT}
+
+    async def evaluate(_request: Any, _session_id: str, _conv: Any, body: Any, *_: Any, **__: Any):
+        text = body.data["content"][-1]["text"]
+        return (
+            {"verdict": "deny", "reason": "Blocked test input"} if text in denied_texts else None
+        )
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.routes_events._evaluate_input_policy", evaluate
+    )
+    forwarded: list[dict[str, Any]] = []
+    runner = _stub_runner(monkeypatch, forwarded)
+
+    def sent() -> list[str]:
+        return [
+            event["content"][-1]["text"] for event in forwarded if event.get("type") == "message"
+        ]
+
+    async def recover_until_idle() -> None:
+        for _ in range(10):
+            await startup._recover_session(env.app, session_id, connection)
+            await asyncio.gather(*startup._deliveries.values(), return_exceptions=True)
+
+    try:
+        await recover_until_idle()
+        assert sent() == ["Second input"]
+        [refused] = env.conv_store.list_pending_inputs(session_id)
+        assert refused.id == first.id and refused.status == "failed"
+        assert second.id not in {
+            item.id for item in env.conv_store.list_pending_inputs(session_id)
+        }
+
+        denied_texts.clear()
+        assert await startup.retry(session_id)
+        await recover_until_idle()
+        assert sent() == ["Second input", _TEXT]
+        assert env.conv_store.list_pending_inputs(session_id) == []
+    finally:
+        await runner.aclose()
+
+
+async def test_native_receipt_wakes_the_host_worker(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transcript echo that replaces a submitted input frees the next one at once."""
+    env = startup_env
+    session_id = await _create(env, name=CODEX_NATIVE_CODING_AGENT.agent_name)
+    entry = _bind(env, session_id)
+    startup = env.app.state.startup_inputs
+
+    async def dispatch(context: StartupInputContext, session_id: str, _: SessionEventInput):
+        assert await context.claim(env.conv_store, session_id)
+        return {"queued": True, "pending_id": "pending"}
+
+    startup.dispatch = dispatch
+    await startup._deliver(env.app, session_id, entry)
+    assert env.conv_store.list_pending_inputs(session_id)[0].status == "incomplete"
+    woken: list[str] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration.wake_startup_worker", woken.append
+    )
+    pending_inputs.reset_for_tests()
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _TEXT)
+    assert env.conv_store.list_pending_inputs(session_id) == []
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and woken == [conv.host_id]
+
+
+async def test_waking_a_host_worker_sets_its_event(startup_env: _Env) -> None:
+    env = startup_env
+    host_id = uuid4().hex
+    _connect_host(env, host_id)
+    startup = env.app.state.startup_inputs
+    startup.host_changed(env.app, host_id)
+    [(_, worker, wake)] = startup._workers.values()
+    try:
+        wake.clear()
+        wake_startup_worker(host_id)
+        assert wake.is_set()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)

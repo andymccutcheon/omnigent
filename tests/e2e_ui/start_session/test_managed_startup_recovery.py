@@ -65,8 +65,7 @@ async def _drive_no_prompt(rig: ManagedReplicas) -> None:
             await client.get(f"{rig.b}/__test/state", params={"host_id": snapshot["host_id"]})
         ).json()
         assert state["host_local"] is True, "the host tunnel was expected on replica B"
-        # The workspace panels are served by the runner; before the fix they
-        # returned 409 "not bound to a runner" until a message arrived.
+        # The workspace panels are served by the runner.
         resources = await client.get(f"{rig.b}{path}/resources")
         assert resources.status_code == 200, resources.text
         rows = (await client.get(f"{rig.ingress}/__test/network")).json()

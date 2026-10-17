@@ -99,6 +99,8 @@ def test_bound_pending_read_and_failed_claim_does_not_change_history(db_uri):
     )
     assert len(store.list_pending_inputs(session.id)) == MAX_PENDING_INPUTS
     assert store.list_items(session.id).data == []
+    if not db_uri.startswith("sqlite"):
+        return  # The plan check below uses SQLite's EXPLAIN syntax.
     with store._conv_session("test_pending_query_plan") as db:
         plan = db.execute(
             text(
@@ -122,6 +124,8 @@ def test_host_pagination_and_workspace_isolation(db_uri):
     with workspace_scope(17):
         assert store.list_host_conversation_ids(host_id) == []
         assert store.list_pending_inputs(ids[0]) == []
+    if not db_uri.startswith("sqlite"):
+        return  # The plan check below uses SQLite's EXPLAIN syntax.
     with store._session("test_host_query_plan") as db:
         plan = db.execute(
             text(
@@ -201,3 +205,19 @@ def test_pending_payload_and_options_use_item_encoding_hooks(db_uri):
     )
     assert restarted.list_pending_inputs(session.id) == []
     assert restarted.list_items(session.id).data == [receipt]
+
+
+def test_pending_input_pages_continue_in_submission_order(db_uri):
+    store = SqlAlchemyConversationStore(db_uri)
+    session = store.create_conversation()
+    saved = store.append(session.id, [_input() for _ in range(5)])
+    first, cursor = store.list_pending_inputs_page(session.id, limit=2)
+    second, cursor = store.list_pending_inputs_page(session.id, after=cursor, limit=2)
+    third, end = store.list_pending_inputs_page(session.id, after=cursor, limit=2)
+    assert end is None
+    assert [item.id for item in first + second + third] == [item.id for item in saved]
+    exact, end = store.list_pending_inputs_page(session.id, limit=5)
+    assert len(exact) == 5 and end is None
+    assert [item.id for item in store.list_pending_inputs(session.id)] == [
+        item.id for item in saved
+    ]

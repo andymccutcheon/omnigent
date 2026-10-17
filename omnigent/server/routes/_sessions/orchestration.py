@@ -379,6 +379,7 @@ from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     StartupInputContext,
     restore_pending_inputs,
+    wake_startup_worker,
 )
 from omnigent.server.subagent_activity import (
     claude_subagent_completion_markers,
@@ -3068,6 +3069,9 @@ async def _persist_external_conversation_item_unlocked(
     # go back into play.
     _release_drained_inputs(session_id, [*skipped_pending, *uncertain_pending, drained])
     _restore_drained_inputs(session_id, held_older, None)
+    if item.replaces_pending_id is not None and conv.host_id is not None:
+        # A saved startup input's receipt frees the next one queued behind it.
+        wake_startup_worker(conv.host_id)
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
     # event names each skipped entry so clients settle those bubbles in order
