@@ -601,7 +601,8 @@ already uploaded or registered an agent. The response is the full
     When `/v1/info` advertises `durable_initial_input: true`, managed creates
     can include one user `message` or SDK skill `slash_command` event. For example:
     `{"type":"message","data":{"role":"user","content":[{"type":"input_text","text":"Run the tests"}]}}`.
-    The server saves the input before accepting the create, then dispatches it
+    The server saves the input before accepting the create (a create whose input
+    can't be saved is refused and leaves no session), then dispatches it
     through the normal event handler on the replica holding the new host.
     Closing the creating browser after acceptance does not cancel delivery.
     Do not also POST that input to `/events`. `initial_items` keeps its existing
@@ -609,7 +610,9 @@ already uploaded or registered an agent. The response is the full
     Attribution comes from the authenticated creator; EDIT permission and input
     policies are checked again at dispatch. Pending input appears in the session
     snapshot's `pending_inputs`. Additional messages sent to `/events` during
-    startup are also saved and acknowledged immediately, in submission order.
+    startup are also saved and acknowledged immediately, in submission order,
+    unless the launch already failed or the bound host is gone; those take the
+    ordinary error or relaunch path.
     Up to 100 pending inputs are accepted per session; excess sends are refused.
 
     Pending messages use the existing conversation items and status fields.
