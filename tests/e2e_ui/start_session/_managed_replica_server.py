@@ -56,6 +56,8 @@ class LocalManagedHost(SandboxHostLauncher):
         self.unkeyed_url = unkeyed_url
         self.gate = threading.Event()
         self.provisioning = threading.Event()
+        # Set to make the next provision fail like a cloud allocation error.
+        self.fail_provision = False
         self.process: subprocess.Popen[bytes] | None = None
 
     def prepare(self) -> None:
@@ -64,6 +66,8 @@ class LocalManagedHost(SandboxHostLauncher):
     def provision(self, name: str) -> str:
         self.provisioning.set()
         assert self.gate.wait(timeout=120), "browser never released sandbox provisioning"
+        if self.fail_provision:
+            raise RuntimeError("injected sandbox allocation failure")
         return name
 
     def start_host(
@@ -151,6 +155,11 @@ def replica_app(
     async def release() -> dict[str, bool]:
         launcher.gate.set()
         return {"released": True}
+
+    @control.post("/provision/fail")
+    async def fail_provision() -> dict[str, bool]:
+        launcher.fail_provision = True
+        return {"failing": True}
 
     @control.post("/host/stop")
     async def stop_host() -> dict[str, bool]:
