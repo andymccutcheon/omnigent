@@ -29,7 +29,14 @@ _REPLY = "I received the startup message while the browser was closed."
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("managed_replicas", ["a", "b"], indirect=True)
+# The create stays on replica A; the host's tunnel joins it there, or (keying
+# by its own id) lands on replica B, where no browser can rescue delivery.
+@pytest.mark.parametrize(
+    "managed_replicas",
+    [(True, False), (True, True)],
+    ids=["same-replica", "other-replica"],
+    indirect=True,
+)
 def test_managed_first_input_runs_after_browser_closes(
     managed_replicas: ManagedReplicas,  # noqa: F811 — pytest injects the imported fixture
     mock_llm_server_url: str,

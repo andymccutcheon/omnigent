@@ -31,6 +31,8 @@ def _minimal_native_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.timeout(300)
+# Create on replica A, host tunnel on replica B: delivery crosses replicas.
+@pytest.mark.parametrize("managed_replicas", [(True, True)], indirect=True)
 @pytest.mark.parametrize("agent_name", ["routing_probe", "codex-native-ui"])
 def test_startup_followups_survive_browser_close(
     managed_replicas: ManagedReplicas, mock_llm_server_url: str, agent_name: str
