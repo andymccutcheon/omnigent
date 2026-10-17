@@ -419,8 +419,6 @@ class ConversationStore(ABC):
     updates, and deletion.
     """
 
-    supports_pending_inputs = False
-
     def list_pending_inputs(self, conversation_id: str) -> list[ConversationItem]:  # noqa: ARG002
         """Return the bounded startup inputs in submission order."""
         return []

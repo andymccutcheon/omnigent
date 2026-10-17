@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -16,14 +17,26 @@ import pytest_asyncio
 from fastapi import FastAPI
 from starlette.datastructures import Headers
 
+from omnigent.entities.conversation import ErrorData
 from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT, CODEX_NATIVE_CODING_AGENT
 from omnigent.host.frames import HostHelloFrame
 from omnigent.runtime import pending_inputs
+from omnigent.runtime.agent_cache import AgentCache
+from omnigent.server.app import create_app
+from omnigent.server.managed_hosts import parse_sandbox_config
 from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
 from omnigent.server.routes.sessions import routes_core
 from omnigent.server.schemas import SessionEventInput
-from omnigent.server.startup_inputs import ManagedStartupInputs, StartupInputContext
+from omnigent.server.startup_inputs import (
+    STARTUP_LABEL,
+    ManagedStartupInputs,
+    StartupInputContext,
+)
+from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.artifact_store.local import LocalArtifactStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.server.helpers import build_agent_bundle, create_test_agent
 from tests.server.integration.test_managed_launch_failure_teardown import (
@@ -43,6 +56,31 @@ _INPUT = {
     "type": "message",
     "data": {"role": "user", "content": [{"type": "input_text", "text": _TEXT}]},
 }
+
+
+@pytest.fixture
+def auth_app(runtime_init: None, db_uri: str, tmp_path: Path) -> FastAPI:
+    """The shared auth-enabled app, with managed sandboxes configured."""
+    from omnigent.server.auth import UnifiedAuthProvider
+
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        permission_store=SqlAlchemyPermissionStore(db_uri),
+        auth_provider=UnifiedAuthProvider(source="header"),
+        host_store=HostStore(db_uri),
+        sandbox_config=parse_sandbox_config(
+            {
+                "provider": "modal",
+                "server_url": "https://managed-test.example.com",
+                "modal": {"image": "docker.io/test/omnigent-host:latest"},
+            }
+        ),
+    )
 
 
 @pytest_asyncio.fixture
@@ -570,3 +608,173 @@ async def test_saved_sdk_skill_resolves_after_launch_and_replaces_pending_bubble
     assert visible.id == saved.id
     assert visible.data.name == "review" and visible.data.arguments == "the startup flow"
     assert hidden.data.is_meta and hidden.id == turn["persisted_item_id"]
+
+
+def _connect_host(env: _Env, host_id: str) -> Any:
+    return env.app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="startup-test", runners=[]),
+        owner=None,
+        registered_with_managed_token=True,
+    )
+
+
+def _stub_launch(
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error_code: str | None = None,
+    error: str | None = None,
+) -> AsyncMock:
+    """Stand in for the host's spawn verdict; the real launch binds the runner first."""
+
+    async def launch(conv: Any, *_: Any) -> _HostLaunchAttempt:
+        runner_id = uuid4().hex
+        env.conv_store.set_runner_id(conv.id, runner_id)
+        return _HostLaunchAttempt(runner_id=runner_id, error_code=error_code, error=error)
+
+    stub = AsyncMock(side_effect=launch)
+    monkeypatch.setattr("omnigent.server.routes.sessions._launch_runner_on_host", stub)
+    return stub
+
+
+async def test_host_replica_starts_the_runner_its_launch_skipped(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch that bound the host on another replica left no runner; the host's replica
+    starts one, then clears the session's startup state."""
+    env = startup_env
+    session_id = await _create(env, initial_input=None)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    connection = _connect_host(env, host_id)
+    launch = _stub_launch(env, monkeypatch)
+    startup = env.app.state.startup_inputs
+
+    assert await startup._recover_session(env.app, session_id, connection) == (True, True)
+    assert launch.await_count == 1
+    assert await startup._recover_session(env.app, session_id, connection) == (False, False)
+    assert launch.await_count == 1
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and STARTUP_LABEL not in conv.labels
+    assert env.conv_store.list_items(session_id).data == []
+
+
+async def test_refused_recovery_launch_is_reported_once(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    session_id = await _create(env, initial_input=None)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    connection = _connect_host(env, host_id)
+    launch = _stub_launch(
+        env,
+        monkeypatch,
+        error_code="harness_not_configured",
+        error="harness is not configured on this host",
+    )
+    startup = env.app.state.startup_inputs
+
+    await startup._recover_session(env.app, session_id, connection)
+    await startup._recover_session(env.app, session_id, connection)
+    assert launch.await_count == 1
+    [error] = env.conv_store.list_items(session_id).data
+    assert isinstance(error.data, ErrorData) and error.data.code == "startup_input_failed"
+    assert "harness is not configured on this host" in error.data.message
+
+
+async def test_finished_startup_skips_pending_input_reads(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    session_id = await _create(env, initial_input=None)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    env.conv_store.set_runner_id(session_id, uuid4().hex)
+    startup = env.app.state.startup_inputs
+    assert await startup._recover_session(env.app, session_id, _connect_host(env, host_id)) == (
+        False,
+        False,
+    )
+    reads = AsyncMock()
+    monkeypatch.setattr(env.conv_store, "list_pending_inputs", reads)
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None
+    assert not await startup.accepts(conv, env.app)
+    reads.assert_not_called()
+
+
+async def test_host_worker_waits_for_a_binding_then_stops_once_started(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host connects before its launch binds a session, so the worker keeps
+    checking until one appears, and exits once every session on the host started."""
+    env = startup_env
+    session_id = await _create(env, initial_input=None)
+    host_id = uuid4().hex
+    _connect_host(env, host_id)
+    launch = _stub_launch(env, monkeypatch)
+    startup = env.app.state.startup_inputs
+
+    startup.host_changed(env.app, host_id)
+    [(_, worker, _)] = startup._workers.values()
+    await asyncio.sleep(0.5)
+    assert not worker.done()
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    await asyncio.wait_for(worker, timeout=10)
+    assert launch.await_count == 1
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and STARTUP_LABEL not in conv.labels
+    assert not startup._workers
+
+
+async def _session_count(env: _Env) -> int:
+    response = await env.client.get("/v1/sessions")
+    assert response.status_code == 200, response.text
+    return len(response.json()["data"])
+
+
+async def test_initial_files_without_initial_input_create_nothing(startup_env: _Env) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    before = await _session_count(env)
+    response = await env.client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"agent_id": agent["id"], "host_type": "managed"})},
+        files=[("initial_files", ("context.txt", b"orphan attachment", "text/plain"))],
+    )
+    assert response.status_code == 400, response.text
+    assert await _session_count(env) == before
+
+
+async def test_failed_initial_upload_deletes_the_new_session(
+    startup_env: _Env, db_uri: str
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    before = await _session_count(env)
+    created: list[str] = []
+    upload = env.app.state.initial_file_upload
+
+    async def failing_upload(request: Any, session_id: str, file: Any) -> dict[str, Any]:
+        created.append(session_id)
+        await upload(request, session_id, file)
+        raise RuntimeError("attachment storage is unavailable")
+
+    env.app.state.initial_file_upload = failing_upload
+    with pytest.raises(RuntimeError, match="attachment storage is unavailable"):
+        await env.client.post(
+            "/v1/sessions",
+            data={
+                "metadata": json.dumps(
+                    {"agent_id": agent["id"], "host_type": "managed", "initial_input": _INPUT}
+                )
+            },
+            files=[("initial_files", ("context.txt", b"never delivered", "text/plain"))],
+        )
+    assert await _session_count(env) == before
+    [session_id] = created
+    assert env.conv_store.get_conversation(session_id) is None
+    assert SqlAlchemyFileStore(db_uri).list(session_id=session_id).data == []

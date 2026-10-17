@@ -28,6 +28,7 @@ from omnigent.runtime import pending_inputs
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.schemas import SessionEventInput, SessionStartupInput
 from omnigent.stores.conversation_store import PENDING_INPUT_RESPONSE_ID, ConversationStore
+from omnigent.stores.host_store import host_is_live
 
 _logger = logging.getLogger(__name__)
 STARTUP_LABEL = "omnigent.startup"
@@ -171,15 +172,36 @@ class ManagedStartupInputs:
             )
         return saved[0]
 
-    async def accepts(self, conv: Conversation) -> bool:
-        if conv.labels.get(STARTUP_LABEL) not in ("pending", "ready"):
+    async def accepts(self, conv: Conversation, app: Any) -> bool:
+        """Whether a new message must wait behind the session's startup."""
+        state = conv.labels.get(STARTUP_LABEL)
+        if state not in ("pending", "ready"):
             return False
-        if conv.labels.get(STARTUP_LABEL) == "pending":
-            return True
-        return any(
+        # A failed launch can't deliver anything; the message path reports why.
+        # Saved inputs stay for an explicit retry.
+        tracker = getattr(app.state, "managed_launches", None)
+        launch = tracker.get(conv.id) if tracker is not None else None
+        if launch is not None and launch.error is not None:
+            return False
+        if any(
             item.status in ("in_progress", "incomplete")
             for item in await asyncio.to_thread(self.conversations.list_pending_inputs, conv.id)
+        ):
+            return True
+        if state != "pending":
+            return False
+        # Nothing is saved yet: hold the message only while the launch can
+        # still deliver it. A bound host that is gone needs the message path's
+        # relaunch instead.
+        if launch is not None or conv.host_id is None:
+            return True
+        host_store = getattr(app.state, "host_store", None)
+        host = (
+            await asyncio.to_thread(host_store.get_host, conv.host_id)
+            if host_store is not None
+            else None
         )
+        return host is not None and host_is_live(host)
 
     async def pending_snapshot(self, session_id: str) -> list[dict[str, Any]]:
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
@@ -212,6 +234,11 @@ class ManagedStartupInputs:
         async def serve() -> None:
             after = None
             delay = 0.25
+            # Over one full pass of the host's sessions: whether any was found,
+            # and whether any still has startup left. The worker stops once the
+            # host has sessions and all have started; until a session is bound
+            # (a host connects just before its launch binds it) it keeps polling.
+            found = unfinished = False
             while self.hosts.get(host_id) is connection:
                 busy = False
                 try:
@@ -221,12 +248,22 @@ class ManagedStartupInputs:
                     for session_id in ids:
                         if self.hosts.get(host_id) is not connection:
                             return
-                        busy |= await self._recover_session(app, session_id, connection)
+                        session_busy, session_unfinished = await self._recover_session(
+                            app, session_id, connection
+                        )
+                        busy |= session_busy
+                        unfinished |= session_unfinished
+                    found |= bool(ids)
                     after = ids[-1] if len(ids) == 32 else None
+                    if after is None:
+                        if found and not unfinished:
+                            return
+                        found = unfinished = False
                     delay = 0.25 if busy or after else min(delay * 2, 30.0)
                 except Exception:
                     _logger.exception("Unable to recover startup messages on host %s", host_id)
                     after = None
+                    found = unfinished = False
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(wake.wait(), timeout=delay)
                 wake.clear()
@@ -242,13 +279,25 @@ class ManagedStartupInputs:
 
     async def _recover_session(
         self, app: Any, session_id: str, connection: HostConnection
-    ) -> bool:
+    ) -> tuple[bool, bool]:
+        """
+        Advance one session's startup on its host's replica.
+
+        :returns: ``(busy, unfinished)``: whether work is in flight, so the
+            worker should check again soon, and whether the session's startup
+            is not over yet.
+        """
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
         if conv is None or conv.host_id != connection.host_id:
-            return False
-        if conv.labels.get(STARTUP_LABEL) == "cancelled":
-            return False
+            return False, False
+        state = conv.labels.get(STARTUP_LABEL)
+        if state is None:
+            return False, False
         items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
+        if state == "cancelled":
+            if not items:
+                await self._finish(session_id)
+            return False, bool(items)
         if items:
             first = items[0]
             key = (current_workspace_id(), session_id)
@@ -257,15 +306,35 @@ class ManagedStartupInputs:
                     self._deliver(app, session_id, first), name=f"startup-input-{session_id}"
                 )
                 self._deliveries[key] = task
-            return first.status == "in_progress"
-        if conv.labels.get(STARTUP_LABEL) != "pending":
-            return False
-        if conv.runner_id is None:
+            return first.status == "in_progress", True
+        if state == "pending" and conv.runner_id is None:
+            # The launch bound this host on a replica without its tunnel, so it
+            # could not start the runner; start it here.
             from omnigent.server.routes.sessions import _launch_runner_on_host
 
-            await _launch_runner_on_host(conv, self.conversations, self.hosts, connection)
-            return True
-        return False
+            attempt = await _launch_runner_on_host(
+                conv, self.conversations, self.hosts, connection
+            )
+            if attempt.error or attempt.error_code:
+                reason = attempt.error or attempt.error_code or "the host refused the launch"
+                await self._report_failure(
+                    session_id,
+                    f"launch_{attempt.runner_id}",
+                    f"The agent could not start on the sandbox: {reason[:1000]}",
+                )
+            return True, True
+        # A runner is bound and nothing is left to deliver.
+        await self._finish(session_id)
+        return False, False
+
+    async def _finish(self, session_id: str) -> None:
+        """Clear a drained session's startup state so later reads skip it."""
+        await asyncio.to_thread(self.conversations.delete_label, session_id, STARTUP_LABEL)
+        # An input saved while the label was being cleared must still be delivered.
+        if await asyncio.to_thread(self.conversations.list_pending_inputs, session_id):
+            await asyncio.to_thread(
+                self.conversations.set_labels, session_id, {STARTUP_LABEL: "ready"}
+            )
 
     async def _deliver(self, app: Any, session_id: str, item: ConversationItem) -> None:
         if self.dispatch is None:
@@ -348,8 +417,16 @@ class ManagedStartupInputs:
                     expected="in_progress",
                     status="failed",
                 )
+            uncertain = bool(context and context.submitted)
             await self._report_failure(
-                session_id, item, str(exc), uncertain=bool(context and context.submitted)
+                session_id,
+                item.id,
+                (
+                    "Delivery could not be confirmed; check the terminal before resending. "
+                    if uncertain
+                    else "The message is saved but could not be delivered. "
+                )
+                + str(exc)[:1000],
             )
         finally:
             self._deliveries.pop(key, None)
@@ -394,27 +471,23 @@ class ManagedStartupInputs:
                     status=None,
                 )
 
-    async def _report_failure(
-        self, session_id: str, item: ConversationItem, detail: str, *, uncertain: bool
-    ) -> None:
+    async def _report_failure(self, session_id: str, failure_id: str, message: str) -> None:
+        """Record a startup failure in the transcript and the session's status."""
         from omnigent.server.routes.sessions import _publish_sandbox_status, _publish_status
 
         if await asyncio.to_thread(self.conversations.get_conversation, session_id) is None:
             return
 
-        message = (
-            "Delivery could not be confirmed; check the terminal before resending. "
-            if uncertain
-            else "The message is saved but could not be delivered. "
-        ) + detail[:1000]
         await asyncio.to_thread(
             self.conversations.append,
             session_id,
             [
                 NewConversationItem(
                     type="error",
-                    response_id=f"startup_{item.id}",
-                    stable_id=uuid5(NAMESPACE_URL, f"startup-failure:{session_id}:{item.id}").hex,
+                    response_id=f"startup_{failure_id}",
+                    stable_id=uuid5(
+                        NAMESPACE_URL, f"startup-failure:{session_id}:{failure_id}"
+                    ).hex,
                     data=ErrorData(
                         source="execution", code="startup_input_failed", message=message
                     ),
@@ -422,7 +495,7 @@ class ManagedStartupInputs:
             ],
         )
         _publish_sandbox_status(session_id, "failed", message)
-        _publish_status(session_id, "failed")
+        _publish_status(session_id, "failed", failure_origin="startup_input_failed")
 
     async def shutdown(self) -> None:
         tasks = [task for _, task, _ in self._workers.values()] + list(self._deliveries.values())

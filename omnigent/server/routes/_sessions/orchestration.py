@@ -3345,8 +3345,12 @@ async def _settle_undelivered_native_input(
     )
     if conversation_store is None:
         return
-    await restore_pending_inputs(conversation_store, session_id)
     pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
+    if pending_id is None:
+        # A saved startup input submitted before a server restart is matched
+        # only once restored.
+        await restore_pending_inputs(conversation_store, session_id)
+        pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
     if pending_id is None:
         return
     drained = pending_inputs.resolve(session_id, pending_id)

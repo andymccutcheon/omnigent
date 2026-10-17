@@ -408,9 +408,8 @@ def register_core_routes(
 ) -> None:
     """Register the core session routes on router."""
 
-    async def _accept_initial_input(
-        request: Request, session_id: str, event: SessionEventInput | None, user_id: str | None
-    ) -> None:
+    async def _check_initial_input(request: Request, event: SessionEventInput | None) -> None:
+        """Refuse a malformed first input before the session exists."""
         from starlette.datastructures import UploadFile as FormUploadFile
 
         form = (
@@ -425,39 +424,68 @@ def register_core_routes(
                     "initial_files requires initial_input", code=ErrorCode.INVALID_INPUT
                 )
             return
-        startup = getattr(request.app.state, "startup_inputs", None)
-        if startup is None:
+        if getattr(request.app.state, "startup_inputs", None) is None:
             raise OmnigentError(
                 "durable initial input is not configured", code=ErrorCode.INVALID_INPUT
             )
-        blocks = []
-        for file in files:
-            if not isinstance(file, FormUploadFile) or file_store is None:
-                raise OmnigentError(
-                    "initial_files must contain uploaded files", code=ErrorCode.INVALID_INPUT
+        if files and (
+            file_store is None or not all(isinstance(file, FormUploadFile) for file in files)
+        ):
+            raise OmnigentError(
+                "initial_files must contain uploaded files", code=ErrorCode.INVALID_INPUT
+            )
+
+    async def _accept_initial_input(
+        request: Request, session_id: str, event: SessionEventInput | None, user_id: str | None
+    ) -> None:
+        """Save a checked first input, deleting the new session if that fails."""
+        if event is None:
+            return
+        startup = request.app.state.startup_inputs
+        try:
+            form = (
+                await request.form()
+                if request.headers.get("content-type", "").startswith("multipart/form-data")
+                else None
+            )
+            blocks = []
+            for file in form.getlist("initial_files") if form is not None else []:
+                assert file_store is not None  # _check_initial_input refused files without one
+                resource = await request.app.state.initial_file_upload(request, session_id, file)
+                stored = await asyncio.to_thread(
+                    file_store.get, resource["id"], session_id=session_id
                 )
-            resource = await request.app.state.initial_file_upload(request, session_id, file)
-            stored = await asyncio.to_thread(file_store.get, resource["id"], session_id=session_id)
-            assert stored is not None
-            blocks.append(
-                {
-                    "type": "input_image"
-                    if (stored.content_type or "").startswith("image/")
-                    else "input_file",
-                    "file_id": stored.id,
-                    "filename": stored.filename,
-                }
-            )
-        if blocks:
-            event = event.model_copy(
-                update={
-                    "data": {
-                        **event.data,
-                        "content": [*blocks, *event.data.get("content", [])],
+                assert stored is not None
+                blocks.append(
+                    {
+                        "type": "input_image"
+                        if (stored.content_type or "").startswith("image/")
+                        else "input_file",
+                        "file_id": stored.id,
+                        "filename": stored.filename,
                     }
-                }
-            )
-        await startup.enqueue(session_id, event, user_id=user_id, headers=request.headers)
+                )
+            if blocks:
+                event = event.model_copy(
+                    update={
+                        "data": {
+                            **event.data,
+                            "content": [*blocks, *event.data.get("content", [])],
+                        }
+                    }
+                )
+            await startup.enqueue(session_id, event, user_id=user_id, headers=request.headers)
+        except Exception:
+            # The create fails, so leave no session (or uploaded file) for a retry
+            # to duplicate.
+            if file_store is not None:
+                blob_keys = await asyncio.to_thread(file_store.delete_all_for_session, session_id)
+                if artifact_store is not None:
+                    for blob_key in blob_keys:
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(artifact_store.delete, blob_key)
+            await conversation_store.delete_conversation(session_id)
+            raise
 
     async def _schedule_managed_launch(
         request: Request,
@@ -893,6 +921,7 @@ def register_core_routes(
 
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
+        await _check_initial_input(request, body.initial_input)
         if body.requested_host_id is not None:
             await _check_requested_host_id(request, body.requested_host_id, user_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
@@ -1125,6 +1154,7 @@ def register_core_routes(
             project_store=project_store,
         )
         parsed_metadata = project_resolution.body
+        await _check_initial_input(request, parsed_metadata.initial_input)
         creation_metadata(
             parent_session_id=parsed_metadata.parent_session_id,
             host_type=parsed_metadata.host_type,

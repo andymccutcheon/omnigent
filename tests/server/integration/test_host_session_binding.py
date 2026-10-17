@@ -839,7 +839,7 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
 ) -> None:
     """
     The managed create is non-blocking, and a message racing the
-    provision rendezvouses on the launch instead of failing fast.
+    provision is saved for the launch to deliver instead of failing fast.
 
     The fake launcher holds ``provision`` on a gate, pinning the
     background launch mid-provision deterministically. While held:
@@ -847,13 +847,13 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     - The create POST has ALREADY returned (with the old synchronous
       create, the POST itself would block on the gate and this test
       would hang at the first await).
-    - A message POST does not resolve — pre-fix it returned 503
+    - A message POST is accepted and saved — pre-fix it returned 503
       "No runner bound for session" immediately, desyncing the Web
       UI's auto-sent first prompt from the provisioning sandbox.
 
     Releasing the gate lets the launch proceed into a host-start
-    failure, which must surface the recorded reason on the waiting
-    message POST (and on later ones), and tear the sandbox down.
+    failure, which must surface the recorded reason on later message
+    POSTs, keep the saved message for a retry, and tear the sandbox down.
     """
     import threading
 
@@ -880,37 +880,33 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     assert snapshot.status_code == 200, snapshot.text
     assert snapshot.json()["sandbox_status"] == {"stage": "provisioning", "error": None}
 
-    message_task = asyncio.create_task(
-        env.client.post(
-            f"/v1/sessions/{session_id}/events",
-            json={
-                "type": "message",
-                "data": {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "hello sandbox"}],
-                },
+    message_resp = await env.client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello sandbox"}],
             },
-        )
+        },
     )
-    # The message parks on the launch rendezvous while provision is
-    # held. Pre-fix this resolved immediately with 503 "No runner
-    # bound for session" — well inside the 0.3s window, so a regression
-    # turns this wait into a completed task and fails the assert.
-    done, _ = await asyncio.wait({message_task}, timeout=0.3)
-    assert not done, (
-        f"message POST resolved during provisioning instead of waiting: "
-        f"{message_task.result().status_code} {message_task.result().text}"
-    )
+    # Saved while provision is held, for the launch to deliver. Pre-fix
+    # this returned 503 "No runner bound for session".
+    assert message_resp.status_code == 202, message_resp.text
+    assert message_resp.json()["queued"] is True
 
     gate.set()
-    message_resp = await asyncio.wait_for(message_task, timeout=15.0)
-    # The launch failed at host start; the parked message reports the
-    # recorded launch failure, not a generic "no runner bound".
-    assert message_resp.status_code == 503, message_resp.text
-    assert "managed sandbox failed to launch" in message_resp.text
-    assert "host startup failed" in message_resp.text
+    tracker = env.app.state.managed_launches
+    for _ in range(150):
+        launch = tracker.get(session_id)
+        if launch is not None and launch.settled.is_set():
+            break
+        await asyncio.sleep(0.1)
+    assert launch is not None and launch.error is not None
 
-    # A later message hits the retained failure record immediately.
+    # A later message hits the retained failure record immediately; the
+    # launch failed at host start, so it reports that reason rather than
+    # a generic "no runner bound".
     late_resp = await env.client.post(
         f"/v1/sessions/{session_id}/events",
         json={
@@ -936,6 +932,9 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     sandbox_status = failed_snapshot.json()["sandbox_status"]
     assert sandbox_status["stage"] == "failed"
     assert "host startup failed" in sandbox_status["error"]
+    # The saved message is kept for an explicit retry.
+    [saved] = failed_snapshot.json()["pending_inputs"]
+    assert saved["content"][-1]["text"] == "hello sandbox"
 
 
 async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(

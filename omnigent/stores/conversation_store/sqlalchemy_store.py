@@ -2143,8 +2143,6 @@ class SqlAlchemyConversationStore(ConversationStore):
             decoded = self._decode_item_data_batch([r.data for r in ordered])
             return [_to_item(r, d) for r, d in zip(ordered, decoded, strict=True)]
 
-    supports_pending_inputs = True
-
     def list_host_conversation_ids(
         self,
         host_id: str,
