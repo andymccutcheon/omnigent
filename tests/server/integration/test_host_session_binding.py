@@ -903,6 +903,13 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
             break
         await asyncio.sleep(0.1)
     assert launch is not None and launch.error is not None
+    # Replicas without this tracker entry see the failure on the session.
+    for _ in range(50):
+        conv = env.conv_store.get_conversation(session_id)
+        if conv is not None and conv.labels.get("omnigent.startup") == "failed":
+            break
+        await asyncio.sleep(0.1)
+    assert conv is not None and conv.labels.get("omnigent.startup") == "failed"
 
     # A later message hits the retained failure record immediately; the
     # launch failed at host start, so it reports that reason rather than

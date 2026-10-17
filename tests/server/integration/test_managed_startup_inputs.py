@@ -652,9 +652,9 @@ async def test_host_replica_starts_the_runner_its_launch_skipped(
     launch = _stub_launch(env, monkeypatch)
     startup = env.app.state.startup_inputs
 
-    assert await startup._recover_session(env.app, session_id, connection) == (True, True)
+    assert await startup._recover_session(env.app, session_id, connection) is True
     assert launch.await_count == 1
-    assert await startup._recover_session(env.app, session_id, connection) == (False, False)
+    assert await startup._recover_session(env.app, session_id, connection) is False
     assert launch.await_count == 1
     conv = env.conv_store.get_conversation(session_id)
     assert conv is not None and STARTUP_LABEL not in conv.labels
@@ -694,9 +694,8 @@ async def test_finished_startup_skips_pending_input_reads(
     env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
     env.conv_store.set_runner_id(session_id, uuid4().hex)
     startup = env.app.state.startup_inputs
-    assert await startup._recover_session(env.app, session_id, _connect_host(env, host_id)) == (
-        False,
-        False,
+    assert (
+        await startup._recover_session(env.app, session_id, _connect_host(env, host_id)) is False
     )
     reads = AsyncMock()
     monkeypatch.setattr(env.conv_store, "list_pending_inputs", reads)
@@ -706,11 +705,10 @@ async def test_finished_startup_skips_pending_input_reads(
     reads.assert_not_called()
 
 
-async def test_host_worker_waits_for_a_binding_then_stops_once_started(
+async def test_host_worker_starts_the_runner_once_the_launch_binds_its_host(
     startup_env: _Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The host connects before its launch binds a session, so the worker keeps
-    checking until one appears, and exits once every session on the host started."""
+    """The host connects before its launch binds a session; the worker keeps checking."""
     env = startup_env
     session_id = await _create(env, initial_input=None)
     host_id = uuid4().hex
@@ -720,14 +718,77 @@ async def test_host_worker_waits_for_a_binding_then_stops_once_started(
 
     startup.host_changed(env.app, host_id)
     [(_, worker, _)] = startup._workers.values()
-    await asyncio.sleep(0.5)
-    assert not worker.done()
+    try:
+        await asyncio.sleep(0.5)
+        assert launch.await_count == 0
+        env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+        for _ in range(100):
+            conv = env.conv_store.get_conversation(session_id)
+            if conv is not None and STARTUP_LABEL not in conv.labels:
+                break
+            await asyncio.sleep(0.1)
+        assert launch.await_count == 1
+        assert conv is not None and STARTUP_LABEL not in conv.labels
+        assert not worker.done()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_input_saved_while_startup_finishes_is_still_delivered(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A follow-up accepted just before the label was cleared must not be stranded."""
+    env = startup_env
+    session_id = await _create(env, initial_input=None)
+    host_id = uuid4().hex
     env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
-    await asyncio.wait_for(worker, timeout=10)
-    assert launch.await_count == 1
+    env.conv_store.set_runner_id(session_id, uuid4().hex)
+    connection = _connect_host(env, host_id)
+    startup = env.app.state.startup_inputs
+    assert await startup._recover_session(env.app, session_id, connection) is False
     conv = env.conv_store.get_conversation(session_id)
     assert conv is not None and STARTUP_LABEL not in conv.labels
-    assert not startup._workers
+
+    saved = await startup.enqueue(
+        session_id,
+        SessionEventInput.model_validate(_INPUT),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.labels[STARTUP_LABEL] == "ready"
+    delivered: list[str] = []
+
+    async def deliver(_app: Any, _session_id: str, item: Any) -> None:
+        delivered.append(item.id)
+
+    monkeypatch.setattr(startup, "_deliver", deliver)
+    env.conv_store.delete_label(session_id, STARTUP_LABEL)
+    assert await startup._recover_session(env.app, session_id, connection) is True
+    await asyncio.sleep(0)
+    assert delivered == [saved.id]
+
+
+async def test_failed_create_launch_is_visible_to_every_replica(
+    startup_env: _Env,
+) -> None:
+    env = startup_env
+    session_id = await _create(env)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    startup = env.app.state.startup_inputs
+    await startup.record_launch_failure(session_id)
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.labels[STARTUP_LABEL] == "failed"
+    # Another replica has no tracker entry for the launch.
+    env.app.state.managed_launches = type(env.app.state.managed_launches)()
+    assert not await startup.accepts(conv, env.app)
+    assert (
+        await startup._recover_session(env.app, session_id, _connect_host(env, uuid4().hex))
+        is False
+    )
 
 
 async def _session_count(env: _Env) -> int:

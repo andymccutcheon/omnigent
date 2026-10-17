@@ -27,7 +27,11 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime import pending_inputs
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.schemas import SessionEventInput, SessionStartupInput
-from omnigent.stores.conversation_store import PENDING_INPUT_RESPONSE_ID, ConversationStore
+from omnigent.stores.conversation_store import (
+    PENDING_INPUT_RESPONSE_ID,
+    ConversationNotFoundError,
+    ConversationStore,
+)
 from omnigent.stores.host_store import host_is_live
 
 _logger = logging.getLogger(__name__)
@@ -170,7 +174,23 @@ class ManagedStartupInputs:
             await asyncio.to_thread(
                 self.conversations.set_labels, session_id, {STARTUP_LABEL: "pending"}
             )
+        else:
+            conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+            if conv is not None and STARTUP_LABEL not in conv.labels:
+                # The startup finished as this was saved; keep later messages behind it.
+                await asyncio.to_thread(
+                    self.conversations.set_labels, session_id, {STARTUP_LABEL: "ready"}
+                )
         return saved[0]
+
+    async def record_launch_failure(self, session_id: str) -> None:
+        """Mark a failed create launch on the session, for replicas without its tracker."""
+        if await asyncio.to_thread(self.conversations.get_conversation, session_id) is None:
+            return
+        with contextlib.suppress(ConversationNotFoundError):
+            await asyncio.to_thread(
+                self.conversations.set_labels, session_id, {STARTUP_LABEL: "failed"}
+            )
 
     async def accepts(self, conv: Conversation, app: Any) -> bool:
         """Whether a new message must wait behind the session's startup."""
@@ -178,7 +198,7 @@ class ManagedStartupInputs:
         if state not in ("pending", "ready"):
             return False
         # A failed launch can't deliver anything; the message path reports why.
-        # Saved inputs stay for an explicit retry.
+        # The tracker knows on the launching replica, the label everywhere.
         tracker = getattr(app.state, "managed_launches", None)
         launch = tracker.get(conv.id) if tracker is not None else None
         if launch is not None and launch.error is not None:
@@ -234,11 +254,6 @@ class ManagedStartupInputs:
         async def serve() -> None:
             after = None
             delay = 0.25
-            # Over one full pass of the host's sessions: whether any was found,
-            # and whether any still has startup left. The worker stops once the
-            # host has sessions and all have started; until a session is bound
-            # (a host connects just before its launch binds it) it keeps polling.
-            found = unfinished = False
             while self.hosts.get(host_id) is connection:
                 busy = False
                 try:
@@ -248,22 +263,12 @@ class ManagedStartupInputs:
                     for session_id in ids:
                         if self.hosts.get(host_id) is not connection:
                             return
-                        session_busy, session_unfinished = await self._recover_session(
-                            app, session_id, connection
-                        )
-                        busy |= session_busy
-                        unfinished |= session_unfinished
-                    found |= bool(ids)
+                        busy |= await self._recover_session(app, session_id, connection)
                     after = ids[-1] if len(ids) == 32 else None
-                    if after is None:
-                        if found and not unfinished:
-                            return
-                        found = unfinished = False
                     delay = 0.25 if busy or after else min(delay * 2, 30.0)
                 except Exception:
                     _logger.exception("Unable to recover startup messages on host %s", host_id)
                     after = None
-                    found = unfinished = False
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(wake.wait(), timeout=delay)
                 wake.clear()
@@ -279,26 +284,22 @@ class ManagedStartupInputs:
 
     async def _recover_session(
         self, app: Any, session_id: str, connection: HostConnection
-    ) -> tuple[bool, bool]:
-        """
-        Advance one session's startup on its host's replica.
-
-        :returns: ``(busy, unfinished)``: whether work is in flight, so the
-            worker should check again soon, and whether the session's startup
-            is not over yet.
-        """
+    ) -> bool:
+        """Advance one session's startup here; return whether work is in flight."""
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
         if conv is None or conv.host_id != connection.host_id:
-            return False, False
+            return False
         state = conv.labels.get(STARTUP_LABEL)
-        if state is None:
-            return False, False
+        if state == "failed":
+            return False
         items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         if state == "cancelled":
             if not items:
                 await self._finish(session_id)
-            return False, bool(items)
+            return False
         if items:
+            # Delivered even without the label: a message saved while the label
+            # was being cleared still belongs to this session's startup.
             first = items[0]
             key = (current_workspace_id(), session_id)
             if first.status == "in_progress" and key not in self._deliveries:
@@ -306,7 +307,7 @@ class ManagedStartupInputs:
                     self._deliver(app, session_id, first), name=f"startup-input-{session_id}"
                 )
                 self._deliveries[key] = task
-            return first.status == "in_progress", True
+            return first.status == "in_progress"
         if state == "pending" and conv.runner_id is None:
             # The launch bound this host on a replica without its tunnel, so it
             # could not start the runner; start it here.
@@ -322,10 +323,11 @@ class ManagedStartupInputs:
                     f"launch_{attempt.runner_id}",
                     f"The agent could not start on the sandbox: {reason[:1000]}",
                 )
-            return True, True
-        # A runner is bound and nothing is left to deliver.
-        await self._finish(session_id)
-        return False, False
+            return True
+        if state is not None:
+            # A runner is bound and nothing is left to deliver.
+            await self._finish(session_id)
+        return False
 
     async def _finish(self, session_id: str) -> None:
         """Clear a drained session's startup state so later reads skip it."""
