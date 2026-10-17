@@ -183,13 +183,34 @@ class ManagedStartupInputs:
                 )
         return saved[0]
 
-    async def record_launch_failure(self, session_id: str) -> None:
-        """Mark a failed create launch on the session, for replicas without its tracker."""
+    async def record_launch_failure(self, session_id: str, reason: str) -> None:
+        """
+        Mark a failed create launch on the session, for replicas without its tracker.
+
+        No sandbox is left to deliver the saved inputs, so they are failed and
+        the transcript says why.
+        """
         if await asyncio.to_thread(self.conversations.get_conversation, session_id) is None:
             return
         with contextlib.suppress(ConversationNotFoundError):
             await asyncio.to_thread(
                 self.conversations.set_labels, session_id, {STARTUP_LABEL: "failed"}
+            )
+        undelivered = False
+        for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id):
+            if item.status == "in_progress":
+                undelivered |= await asyncio.to_thread(
+                    self.conversations.transition_pending_input,
+                    session_id,
+                    item.id,
+                    expected="in_progress",
+                    status="failed",
+                )
+        if undelivered:
+            await self._report_failure(
+                session_id,
+                "launch_failed",
+                f"The message could not be delivered: {reason[:1000]}",
             )
 
     async def accepts(self, conv: Conversation, app: Any) -> bool:

@@ -624,10 +624,17 @@ def register_core_routes(
         startup = getattr(request.app.state, "startup_inputs", None)
 
         async def launch_and_record_failure() -> None:
-            await launch
+            try:
+                await launch
+            except Exception as exc:
+                if startup is not None:
+                    await startup.record_launch_failure(
+                        session_id, f"managed sandbox failed to launch: {exc}"
+                    )
+                raise
             failed = managed_launches.get(session_id)
             if startup is not None and failed is not None and failed.error is not None:
-                await startup.record_launch_failure(session_id)
+                await startup.record_launch_failure(session_id, failed.error)
 
         launch_task = asyncio.create_task(launch_and_record_failure())
         _managed_launch_tasks.add(launch_task)

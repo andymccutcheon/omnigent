@@ -853,7 +853,7 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
 
     Releasing the gate lets the launch proceed into a host-start
     failure, which must surface the recorded reason on later message
-    POSTs, keep the saved message for a retry, and tear the sandbox down.
+    POSTs, report the saved message as undelivered, and tear the sandbox down.
     """
     import threading
 
@@ -939,9 +939,10 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     sandbox_status = failed_snapshot.json()["sandbox_status"]
     assert sandbox_status["stage"] == "failed"
     assert "host startup failed" in sandbox_status["error"]
-    # The saved message is kept for an explicit retry.
-    [saved] = failed_snapshot.json()["pending_inputs"]
-    assert saved["content"][-1]["text"] == "hello sandbox"
+    # No sandbox is left to deliver the saved message; the transcript says so.
+    assert failed_snapshot.json()["pending_inputs"] == []
+    errors = [item for item in failed_snapshot.json()["items"] if item["type"] == "error"]
+    assert any("host startup failed" in item["data"]["message"] for item in errors), errors
 
 
 async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
